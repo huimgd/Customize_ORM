@@ -4,7 +4,7 @@ using System.Data.Common;
 namespace Customize_ORM.Extensions.Sql
 {
     /// <summary>
-    /// Defines database-specific SQL parameter behavior for expression building.
+    /// 为表达式构建定义特定于数据库的SQL参数行为。
     /// </summary>
     public abstract class SqlDialect
     {

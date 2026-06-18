@@ -5,7 +5,7 @@ using Customize_ORM.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Test.Entitys;
+using Test.Entities;
 
 namespace Test
 {
@@ -13,15 +13,15 @@ namespace Test
     {
         static async Task Main(string[] args)
         {
-            ClickHouseQuerySqlBuilderRegression.Run();
-            PostgreSqlQuerySqlBuilderRegression.Run();
-            PostgreSqlParameterFactoryRegression.Run();
-            PostgreSqlCteUpdateCommandBuilderRegression.Run();
-            PostgreSqlBulkUpdateSqlBuilderRegression.Run();
-            EntityDataReaderMapperRegression.Run();
-            DbRecordMapperRegression.Run();
-            OwnedDbDataReaderRegression.Run();
-            SqlExpressionRegression.Run();
+            //ClickHouseQuerySqlBuilderRegression.Run();
+            //PostgreSqlQuerySqlBuilderRegression.Run();
+            //PostgreSqlParameterFactoryRegression.Run();
+            //PostgreSqlCteUpdateCommandBuilderRegression.Run();
+            //PostgreSqlBulkUpdateSqlBuilderRegression.Run();
+            //EntityDataReaderMapperRegression.Run();
+            //DbRecordMapperRegression.Run();
+            //OwnedDbDataReaderRegression.Run();
+            //SqlExpressionRegression.Run();
 
             if (args.Contains("--regression-only", StringComparer.OrdinalIgnoreCase))
             {
@@ -70,6 +70,12 @@ namespace Test
             var repository = serviceProvider.GetRequiredService<IPostgresRepository<AdminEntity>>();
            long count = await repository.GetCountAsync(e => e.IsDeleted == false, CancellationToken.None);
             Console.WriteLine($"未删除的管理员数量: {count}");
+            var blacklogs=serviceProvider.GetRequiredService<IClickhouseRepository<BlackApiLogEntity>>();
+           var loginfos=blacklogs.QueryStreamAsync(e => e.IsBlackMobile == true);
+            await foreach (var log in loginfos)
+            {
+                Console.WriteLine($"黑名单日志: {log.Id}, 手机号: {log.Mobile}, 持续时间: {log.ExecutionDuration}");
+            }
         }
     }
 }

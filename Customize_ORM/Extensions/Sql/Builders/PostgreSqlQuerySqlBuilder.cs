@@ -2,6 +2,9 @@ using Customize_ORM.Extensions;
 
 namespace Customize_ORM.Extensions.Sql
 {
+    /// <summary>
+    /// PostgreSQL 基础查询 SQL 构建器，集中生成仓储常用的 SELECT、COUNT、UPDATE 和 COPY 语句。
+    /// </summary>
     internal sealed class PostgreSqlQuerySqlBuilder<T>
     {
         public PostgreSqlQuerySqlBuilder(EntityMapping<T> mapping, string? tableName = null)

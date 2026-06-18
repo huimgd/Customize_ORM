@@ -1,12 +1,11 @@
 ﻿using ClickHouse.Driver;
 using Customize_ORM.Extensions;
+using Customize_ORM.Extensions.Sql;
 using Customize_ORM.Interfaces;
 using Customize_ORM.Interfaces.ConnectionFactory;
 using Customize_ORM.Models;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
-using Customize_ORM.Extensions.Sql;
-using System.Data;
 using System.Data.Common;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -150,7 +149,7 @@ namespace Customize_ORM.Impl
                 sqlExpr.Where(expression);
 
             var (whereClause, parameters) = sqlExpr.BuildWhereClause();
-            var sql = queryBuilder.SelectAll(final: true);
+            var sql = queryBuilder.SelectAll();
             sql = queryBuilder.ApplyWhere(sql, whereClause);
             sql = queryBuilder.ApplyOrderBy(sql);
 
@@ -192,7 +191,7 @@ namespace Customize_ORM.Impl
             CancellationToken token = default)
         {
             var queryBuilder = CreateQueryBuilder(tableName);
-            var sql = queryBuilder.SelectAll(final: true);
+            var sql = queryBuilder.SelectAll();
             try
             {
                 var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.ClickHouse);

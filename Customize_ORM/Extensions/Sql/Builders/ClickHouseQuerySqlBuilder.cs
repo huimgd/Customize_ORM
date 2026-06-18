@@ -2,6 +2,9 @@ using Customize_ORM.Extensions;
 
 namespace Customize_ORM.Extensions.Sql
 {
+    /// <summary>
+    /// ClickHouse 查询 SQL 构建器，统一处理 FINAL、默认排序、分页和基础 SELECT/COUNT 片段。
+    /// </summary>
     internal sealed class ClickHouseQuerySqlBuilder<T>
     {
         private readonly string _defaultOrderColumn;

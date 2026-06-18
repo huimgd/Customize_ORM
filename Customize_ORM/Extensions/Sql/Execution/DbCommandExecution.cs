@@ -4,7 +4,7 @@ using System.Data.Common;
 namespace Customize_ORM.Extensions.Sql
 {
     /// <summary>
-    /// Shared command execution helpers for repositories that already own SQL composition and result mapping.
+    /// 仓储内部共享的命令执行工具，负责创建命令、挂载参数并处理读取器生命周期。
     /// </summary>
     internal static class DbCommandExecution
     {

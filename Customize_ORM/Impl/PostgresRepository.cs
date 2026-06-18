@@ -53,7 +53,7 @@ namespace Customize_ORM.Impl
             return connection;
         }
 
-        private async Task<List<TResult>> ReadAllAsync<TResult>(
+        private static async Task<List<TResult>> ReadAllAsync<TResult>(
             NpgsqlConnection connection,
             string sql,
             IReadOnlyList<DbParameter>? parameters,
@@ -77,7 +77,7 @@ namespace Customize_ORM.Impl
             return results;
         }
 
-        private async Task<TResult?> ReadFirstOrDefaultAsync<TResult>(
+        private static async Task<TResult?> ReadFirstOrDefaultAsync<TResult>(
             NpgsqlConnection connection,
             string sql,
             IReadOnlyList<DbParameter>? parameters,

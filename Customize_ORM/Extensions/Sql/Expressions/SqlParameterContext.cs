@@ -4,7 +4,7 @@ using System.Data.Common;
 namespace Customize_ORM.Extensions.Sql
 {
     /// <summary>
-    /// Tracks generated SQL parameters and their literal values for expression rendering.
+    /// 跟踪生成的SQL参数及其用于表达式呈现的文字值。
     /// </summary>
     public sealed class SqlParameterContext
     {

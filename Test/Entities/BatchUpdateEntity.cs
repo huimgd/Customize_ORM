@@ -1,7 +1,7 @@
 using Customize_ORM.Attributes;
 using System.ComponentModel.DataAnnotations.Schema;
 
-namespace Test.Entitys
+namespace Test.Entities
 {
     [Table("batch_update_entity")]
     public class BatchUpdateEntity

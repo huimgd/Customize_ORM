@@ -7,7 +7,7 @@ using System.Threading;
 namespace Customize_ORM.Extensions.Sql
 {
     /// <summary>
-    /// Keeps the owning command alive for the lifetime of the reader and disposes it when the reader is closed.
+    /// 持有命令生命周期的 DataReader 包装器，确保读取器关闭时命令和连接一起释放。
     /// </summary>
     internal sealed class OwnedDbDataReader : DbDataReader
     {

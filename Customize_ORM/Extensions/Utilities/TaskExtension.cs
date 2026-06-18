@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace Customize_ORM.Extensions
+﻿namespace Customize_ORM.Extensions
 {
     public static class TaskExtension
     {

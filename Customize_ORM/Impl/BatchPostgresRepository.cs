@@ -7,9 +7,7 @@ using Customize_ORM.Models;
 using MessagePack;
 using Microsoft.Extensions.Logging;
 using Npgsql;
-using NpgsqlTypes;
 using System.Collections.Concurrent;
-using System.Data.Common;
 using System.Diagnostics;
 using System.Linq.Expressions;
 using System.Threading.Channels;
@@ -109,7 +107,7 @@ namespace Customize_ORM.Impl
             try
             {
                 ArgumentNullException.ThrowIfNull(operation, nameof(operation));
-                await _retryChannel.Writer.WriteAsync(operation);
+                await _retryChannel.Writer.WriteAsync(operation,token);
                 return true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -895,7 +893,7 @@ namespace Customize_ORM.Impl
         /// <param name="columns"></param>
         /// <returns></returns>
         /// <exception cref="InvalidOperationException"></exception>
-        private Func<T, object[]> GetRowFactoryForColumns(string[] columns)
+        private static Func<T, object[]> GetRowFactoryForColumns(string[] columns)
         {
             // 构建缓存键（列名排序后拼接，忽略大小写差异）
             var key = string.Join("\x1f", columns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase));

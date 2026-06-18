@@ -1,7 +1,7 @@
 using Customize_ORM.Extensions;
 using Customize_ORM.Extensions.Sql;
 using Customize_ORM.Impl;
-using Test.Entitys;
+using Test.Entities;
 
 namespace Test
 {
@@ -25,7 +25,7 @@ namespace Test
                     AssertExact("ORDER BY id", builder.DefaultOrderByClause);
                     AssertExact(
                         $"SELECT {string.Join(", ", Mapping.AllColumns)} FROM admin FINAL",
-                        builder.SelectAll(final: true));
+                        builder.SelectAll());
                     AssertExact("SELECT remark FROM admin", builder.Select("remark", final: false));
                     AssertExact("SELECT COUNT(*) FROM admin FINAL", builder.Count(final: true));
                 });
@@ -37,7 +37,7 @@ namespace Test
                 {
                     var builder = CreateBuilder("admin_archive");
 
-                    var sql = builder.SelectAll(final: true);
+                    var sql = builder.SelectAll();
                     sql = builder.ApplyWhere(sql, "status = @p1");
                     sql = builder.ApplyOrderBy(sql, null);
                     sql = builder.ApplyLimit(sql, 20, 10);

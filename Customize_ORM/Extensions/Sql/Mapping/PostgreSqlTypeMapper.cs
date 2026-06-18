@@ -2,6 +2,9 @@ using NpgsqlTypes;
 
 namespace Customize_ORM.Extensions.Sql
 {
+    /// <summary>
+    /// PostgreSQL 类型映射工具，集中维护 CLR 类型、PostgreSQL 类型名和 NpgsqlDbType 的对应关系。
+    /// </summary>
     internal static class PostgreSqlTypeMapper
     {
         public static string GetPostgreSqlArrayType(Type elementType)

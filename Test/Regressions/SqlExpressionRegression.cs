@@ -3,7 +3,7 @@ using Customize_ORM.Extensions;
 using Customize_ORM.Extensions.Sql;
 using System.Data.Common;
 using System.Linq.Expressions;
-using Test.Entitys;
+using Test.Entities;
 
 namespace Test
 {
@@ -103,6 +103,29 @@ namespace Test
                         expectedWhereClause: "(status IN (@p1, @p2, @p3))",
                         expectedLiteralWhere: "(status IN (1, 2, 3))",
                         expectedParameters: ["@p1=1", "@p2=2", "@p3=3"]);
+                });
+
+            RunCase(
+                failures,
+                "ClickHouse materialized parameters strip the @ prefix for driver binding",
+                () =>
+                {
+                    var expression = CreateExpression(
+                        DBType.ClickHouse,
+                        x => x.Status == 1);
+
+                    var (whereClause, parameters) = expression.BuildWhereClause();
+                    var materialized = ClickHouseDialect.Materialize(parameters.Single());
+
+                    var mismatches = new List<string>();
+                    CollectMismatch(mismatches, "where clause", "(status = @p1)", whereClause);
+                    CollectMismatch(mismatches, "parameter name", "p1", materialized.ParameterName);
+                    CollectMismatch(mismatches, "parameter value", "1", materialized.Value?.ToString() ?? "NULL");
+
+                    if (mismatches.Count > 0)
+                    {
+                        throw new InvalidOperationException(string.Join(Environment.NewLine + Environment.NewLine, mismatches));
+                    }
                 });
 
             RunCase(

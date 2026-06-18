@@ -2,7 +2,7 @@ using Customize_ORM.Extensions;
 using Customize_ORM.Extensions.Sql;
 using System.Data;
 using System.Data.Common;
-using Test.Entitys;
+using Test.Entities;
 
 namespace Test
 {

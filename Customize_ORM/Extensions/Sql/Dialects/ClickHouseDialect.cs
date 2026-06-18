@@ -23,7 +23,8 @@ namespace Customize_ORM.Extensions.Sql
 
             return new ClickHouseDbParameter
             {
-                ParameterName = parameter.ParameterName,
+                // ClickHouse SQL can use @-style placeholders, but the driver binds parameters by bare name.
+                ParameterName = NormalizeParameterNameForBinding(parameter.ParameterName),
                 Value = parameter.Value ?? DBNull.Value,
                 DbType = parameter.DbType,
                 Direction = parameter.Direction,
@@ -33,6 +34,11 @@ namespace Customize_ORM.Extensions.Sql
                 Size = parameter.Size
             };
         }
+
+        private static string NormalizeParameterNameForBinding(string parameterName)
+            => parameterName.StartsWith("@", StringComparison.Ordinal)
+                ? parameterName[1..]
+                : parameterName;
 
         private sealed class ClickHousePlaceholderParameter : DbParameter
         {

@@ -1,7 +1,4 @@
-﻿using Microsoft.Extensions.DependencyInjection;
-using static NpgsqlTypes.NpgsqlTsQuery;
-
-namespace Customize_ORM.Models
+﻿namespace Customize_ORM.Models
 {
     public class AppSettings
     {

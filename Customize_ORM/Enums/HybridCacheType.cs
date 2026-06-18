@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace Customize_ORM.Enums
+﻿namespace Customize_ORM.Enums
 {
     /// <summary>
     /// 混合缓存类型

@@ -2,6 +2,9 @@ using Customize_ORM.Extensions;
 
 namespace Customize_ORM.Extensions.Sql
 {
+    /// <summary>
+    /// PostgreSQL 批量更新 SQL 构建器，统一生成 staging 表、临时表和 UPDATE FROM 语句。
+    /// </summary>
     internal sealed class PostgreSqlBulkUpdateSqlBuilder<T>
     {
         private readonly EntityMapping<T> _mapping;
@@ -106,6 +109,7 @@ namespace Customize_ORM.Extensions.Sql
             var setClauses = string.Join(", ", updateColumns.Select(column => $"{column} = {sourceTableName}.{column}"));
             var whereClause = BuildJoinWhereClause(targetTableName, sourceTableName, additionalWhereClause, legacyTemporarySpacing: true);
 
+            // 保留临时表策略原有 SQL 格式，降低重构期间的行为差异。
             return $@" UPDATE {targetTableName} 
                                             SET {setClauses}
                                             FROM {sourceTableName} 
@@ -153,6 +157,7 @@ namespace Customize_ORM.Extensions.Sql
         private string ResolveStagingAuditColumnName()
         {
             const string defaultAuditColumnName = "created_at";
+            // 实体自身可能已有 created_at 字段，staging 元数据列需要避让。
             return _mapping.PropertyMap.ContainsKey(defaultAuditColumnName)
                 ? "staging_created_at"
                 : defaultAuditColumnName;

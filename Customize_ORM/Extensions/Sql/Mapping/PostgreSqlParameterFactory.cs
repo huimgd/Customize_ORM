@@ -4,6 +4,9 @@ using System.Data;
 
 namespace Customize_ORM.Extensions.Sql
 {
+    /// <summary>
+    /// PostgreSQL 参数工厂，统一处理 null、枚举、ulong、数组和批量数组参数的类型归一化。
+    /// </summary>
     internal static class PostgreSqlParameterFactory
     {
         public static NpgsqlParameter Create(string name, object? value, Type propertyType)
@@ -32,6 +35,7 @@ namespace Customize_ORM.Extensions.Sql
 
             if (propertyType.IsArray && propertyType != typeof(byte[]))
             {
+                // 二维数组参数不适合直接传给 unnest，这里转成 PostgreSQL 数组字面量集合。
                 var arrayElementType = propertyType.GetElementType() ?? typeof(object);
                 var formattedValues = new string[values.Count];
                 for (var i = 0; i < values.Count; i++)

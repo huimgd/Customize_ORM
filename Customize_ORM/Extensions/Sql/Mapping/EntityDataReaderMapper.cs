@@ -4,7 +4,7 @@ using System.Data.Common;
 namespace Customize_ORM.Extensions.Sql
 {
     /// <summary>
-    /// Builds cached entity row mappers from ORM metadata so repositories can share one reader-mapping core.
+    /// 实体行映射器，根据 ORM 映射元数据缓存列到属性的赋值委托，减少重复反射开销。
     /// </summary>
     internal static class EntityDataReaderMapper<T> where T : class
     {

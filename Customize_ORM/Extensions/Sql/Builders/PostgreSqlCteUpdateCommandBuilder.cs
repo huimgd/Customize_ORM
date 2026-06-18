@@ -3,6 +3,9 @@ using System.Data.Common;
 
 namespace Customize_ORM.Extensions.Sql
 {
+    /// <summary>
+    /// PostgreSQL CTE 批量更新命令构建器，负责生成 WITH/UPDATE SQL 与数组参数。
+    /// </summary>
     internal sealed class PostgreSqlCteUpdateCommandBuilder<T>
     {
         private readonly EntityMapping<T> _mapping;
@@ -103,5 +106,8 @@ namespace Customize_ORM.Extensions.Sql
         }
     }
 
+    /// <summary>
+    /// CTE 更新命令定义，包含 SQL 文本和已经归一化的数据库参数。
+    /// </summary>
     internal sealed record PostgreSqlCteUpdateCommand(string Sql, IReadOnlyList<DbParameter> Parameters);
 }

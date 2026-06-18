@@ -5,7 +5,7 @@ using System.Reflection;
 namespace Customize_ORM.Extensions.Sql
 {
     /// <summary>
-    /// Maps data-reader rows to scalar values or simple DTOs without a provider-specific micro-ORM dependency.
+    /// 通用记录映射器，用于将 DbDataReader 的当前行转换为标量值或简单 DTO。
     /// </summary>
     internal static class DbRecordMapper
     {
