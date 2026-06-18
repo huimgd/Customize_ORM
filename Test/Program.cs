@@ -13,6 +13,21 @@ namespace Test
     {
         static async Task Main(string[] args)
         {
+            ClickHouseQuerySqlBuilderRegression.Run();
+            PostgreSqlQuerySqlBuilderRegression.Run();
+            PostgreSqlParameterFactoryRegression.Run();
+            PostgreSqlCteUpdateCommandBuilderRegression.Run();
+            PostgreSqlBulkUpdateSqlBuilderRegression.Run();
+            EntityDataReaderMapperRegression.Run();
+            DbRecordMapperRegression.Run();
+            OwnedDbDataReaderRegression.Run();
+            SqlExpressionRegression.Run();
+
+            if (args.Contains("--regression-only", StringComparer.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
             // 构建配置 (Configuration)
             var configuration = new ConfigurationBuilder()
                 .SetBasePath(Directory.GetCurrentDirectory())

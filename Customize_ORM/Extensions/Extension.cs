@@ -12,7 +12,6 @@ namespace Customize_ORM.Extensions
         {
             //pgsql开启DateTimeOffset支持
             AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
-            Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
             //注入pgsql
             services.AddSingleton<IPgConnectionFactory>(sp =>
             { 

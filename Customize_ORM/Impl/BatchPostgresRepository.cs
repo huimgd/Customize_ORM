@@ -1,5 +1,6 @@
 ﻿using Customize_ORM.Enums;
 using Customize_ORM.Extensions;
+using Customize_ORM.Extensions.Sql;
 using Customize_ORM.Interfaces;
 using Customize_ORM.Interfaces.ConnectionFactory;
 using Customize_ORM.Models;
@@ -8,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using System.Collections.Concurrent;
+using System.Data.Common;
 using System.Diagnostics;
 using System.Linq.Expressions;
 using System.Threading.Channels;
@@ -227,20 +229,10 @@ namespace Customize_ORM.Impl
             try
             {
                 if (_stagingTableChecked) return;
-                var columnsDefs = string.Join(", ",
-                    _upadteMapping.AllColumns.Where(c => c != _upadteMapping.Key)
-                        .Select(c => $"{c} {GetPostgreSqlColumnType(c)}"));
-
-                var createSql = $@"
-                        CREATE UNLOGGED TABLE IF NOT EXISTS {_stagingTableName} (
-                            batch_id UUID NOT NULL,
-                            {_upadteMapping.Key} {GetPostgreSqlColumnType(_upadteMapping.Key)} NOT NULL,
-                            {columnsDefs},
-                            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                        );";
+                var bulkSqlBuilder = new PostgreSqlBulkUpdateSqlBuilder<T>(_upadteMapping);
+                var createSql = bulkSqlBuilder.BuildCreateStagingTableSql(_stagingTableName);
                 await using var conn = await _postgreSql.GetConnectionAsync();
-                using var cmd = new NpgsqlCommand(createSql, conn);
-                await cmd.ExecuteNonQueryAsync();
+                await DbCommandExecution.ExecuteNonQueryAsync(conn, createSql, null, CancellationToken.None);
                 _stagingTableChecked = true;
 
             }
@@ -260,6 +252,7 @@ namespace Customize_ORM.Impl
         {
             Stopwatch sw = Stopwatch.StartNew();
             await EnsureStagingTableExistsAsync();
+            var bulkSqlBuilder = new PostgreSqlBulkUpdateSqlBuilder<T>(_upadteMapping);
             var lazyRetry = new Lazy<RetryOperation<T>>(() => new RetryOperation<T>
             {
                 Entitys = entitys,
@@ -274,7 +267,7 @@ namespace Customize_ORM.Impl
             // 写入 staging 表
             await using (var stagingConn = await _postgreSql.GetConnectionAsync())
             {
-                var copySql = $"COPY {_stagingTableName} (batch_id,{string.Join(",", allColumns)}) FROM STDIN (FORMAT BINARY)";
+                var copySql = bulkSqlBuilder.BuildCopySql(_stagingTableName, allColumns, includeBatchId: true);
                 await using var writer = await stagingConn.BeginBinaryImportAsync(copySql, token);
                 var columnCount = allColumns.Length;
                 var data = new object[columnCount + 1];
@@ -291,16 +284,13 @@ namespace Customize_ORM.Impl
                 await writer.CompleteAsync(token);
             }
             // 步骤2：极短事务执行 UPDATE FROM staging
-            var setClauses = columns.Select(c => $"{c} = staging.{c}");
-            var whereClause = $"{tableName}.{_upadteMapping.Key} = staging.{_upadteMapping.Key} AND {tableName}.{_upadteMapping.PartitionKey} = staging.{_upadteMapping.PartitionKey}";
-            if (!string.IsNullOrWhiteSpace(expressionStr))
-                whereClause += $" AND {expressionStr}";
-
-            var updateSql = $@"
-                UPDATE {tableName}
-                SET {string.Join(", ", setClauses)}
-                FROM {_stagingTableName} AS staging
-                WHERE staging.batch_id = @batchId AND {whereClause}";
+            var updateSql = bulkSqlBuilder.BuildUpdateFromSourceSql(
+                targetTableName: tableName,
+                sourceTableName: _stagingTableName,
+                sourceAlias: "staging",
+                updateColumns: columns,
+                additionalWhereClause: expressionStr,
+                sourcePredicate: "staging.batch_id = @batchId");
 
             await using var connection = await _postgreSql.GetConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync(token);
@@ -311,8 +301,11 @@ namespace Customize_ORM.Impl
                 //{
                 //    await setCmd.ExecuteNonQueryAsync(token);
                 //}
-                using var cmd = new NpgsqlCommand(updateSql, connection, transaction);
-                cmd.Parameters.AddWithValue("batchId", batchId);
+                await using var cmd = DbCommandExecution.CreateCommand(
+                    connection,
+                    updateSql,
+                    [new NpgsqlParameter("batchId", batchId)],
+                    transaction);
                 int affected = await cmd.ExecuteNonQueryAsync(token);
                 if (affected != entitys.Length)
                 {
@@ -376,9 +369,11 @@ namespace Customize_ORM.Impl
             {
                 await using var conn = await _postgreSql.GetConnectionAsync();
                 var sql = $"DELETE FROM {_stagingTableName} WHERE batch_id = @batchId";
-                using var cmd = new NpgsqlCommand(sql, conn);
-                cmd.Parameters.AddWithValue("batchId", batchId);
-                await cmd.ExecuteNonQueryAsync();
+                await DbCommandExecution.ExecuteNonQueryAsync(
+                    conn,
+                    sql,
+                    [new NpgsqlParameter("batchId", batchId)],
+                    CancellationToken.None);
             }
             catch (Exception ex)
             {
@@ -392,6 +387,7 @@ namespace Customize_ORM.Impl
         {
             Stopwatch sw = Stopwatch.StartNew();
             string tmp = $"tmp_{Guid.NewGuid():N}";
+            var bulkSqlBuilder = new PostgreSqlBulkUpdateSqlBuilder<T>(_upadteMapping);
             string[] allColumns = [_upadteMapping.Key, _upadteMapping.PartitionKey, .. columns];
             var lazyRetry = new Lazy<RetryOperation<T>>(() => new RetryOperation<T>
             {
@@ -402,21 +398,17 @@ namespace Customize_ORM.Impl
                 RetryCount = retryCount + 1,
                 RetryTime = CalcNextRetryTime(retryCount + 1)
             }, LazyThreadSafetyMode.ExecutionAndPublication);
-            var columnsDefs = string.Join(", ",
-                  allColumns.Select(c => $"{c} {GetPostgreSqlColumnType(c)}"));
             //创建临时表  
-            string sql = $@"CREATE TEMPORARY TABLE {tmp}({columnsDefs}) ON  COMMIT DROP";
+            string sql = bulkSqlBuilder.BuildCreateTemporaryTableSql(tmp, allColumns);
             await using var connection = await _postgreSql.GetConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync(token);
             try
             {
-                using var command = connection.CreateCommand();
-                command.Transaction = transaction;
-                command.CommandText = sql;
+                await using var command = DbCommandExecution.CreateCommand(connection, sql, transaction: transaction);
                 var rel = await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
                 if (-1 == rel)
                 {
-                    var copySql = $"COPY {tmp} ({string.Join(",", allColumns)}) FROM STDIN (FORMAT BINARY)";
+                    var copySql = bulkSqlBuilder.BuildCopySql(tmp, allColumns);
                     using (var writer = await connection.BeginBinaryImportAsync(copySql, token))
                     {
 
@@ -430,24 +422,12 @@ namespace Customize_ORM.Impl
                     }
                     ;
 
-                    string whereClause = $"{tableName}.{_upadteMapping.Key} = {tmp}.{_upadteMapping.Key} AND {tableName}.{_upadteMapping.PartitionKey}= {tmp}.{_upadteMapping.PartitionKey}";
-                    if (!string.IsNullOrWhiteSpace(expressionStr))
-                    {
-                        whereClause += $" AND {expressionStr}";
-                    }
-                    string[] setClauseArray = new string[columns.Length];
-                    for (int i = 0; i < columns.Length; i++)
-                    {
-                        setClauseArray[i] = $"{columns[i]} = {tmp}.{columns[i]}";
-                    }
-                    string setClauses = string.Join(", ", setClauseArray);
-                    string updateSql = $@" UPDATE {tableName} 
-                                            SET {setClauses}
-                                            FROM {tmp} 
-                                            WHERE {whereClause}";
-                    using var updateCommand = connection.CreateCommand();
-                    updateCommand.Transaction = transaction;
-                    updateCommand.CommandText = updateSql;
+                    string updateSql = bulkSqlBuilder.BuildLegacyTemporaryUpdateSql(
+                        targetTableName: tableName,
+                        sourceTableName: tmp,
+                        updateColumns: columns,
+                        additionalWhereClause: expressionStr);
+                    await using var updateCommand = DbCommandExecution.CreateCommand(connection, updateSql, transaction: transaction);
                     int affected = await updateCommand.ExecuteNonQueryAsync(token);
                     if (affected != entitys.Length)
                     {
@@ -516,88 +496,14 @@ namespace Customize_ORM.Impl
             string guidShort = Guid.NewGuid().ToString("N")[..4];
             string timestampShort = DateTime.Now.ToString("HHmmssfff");
             string tmp = $"cte_{guidShort}{timestampShort}";
-            var valueGetters = _upadteMapping.ValueGetters;
-            string[] allColumns = [_upadteMapping.Key, _upadteMapping.PartitionKey, .. columns];
-            // 构建SET子句
-            var setClauses = new List<string>();
-            foreach (var col in columns)
-            {
-                setClauses.Add($"{col} = {tmp}.{col}");
-            }
-            // 构建完整的WHERE条件（用于更新）
-            List<string> whereConditions = [$"{tableName}.{_upadteMapping.Key} = {tmp}.{_upadteMapping.Key}", $"{tableName}.{_upadteMapping.PartitionKey} = {tmp}.{_upadteMapping.PartitionKey}"];
-            if (!string.IsNullOrWhiteSpace(expressionStr))
-            {
-                whereConditions.Add(expressionStr);
-            }
-            List<NpgsqlParameter> parameters = [];
-            List<string> selectColumns = [];
-            // 为每一列准备数组参数
-            foreach (var column in allColumns)
-            {
-                if (valueGetters.TryGetValue(column, out var getter))
-                {
-                    var propertyType = GetPropertyType(column);
-                    var values = Array.CreateInstance(GetClrTypeForProperty(propertyType), entitys.Length);
-                    for (var i = 0; i < entitys.Length; i++)
-                    {
-                        var value = getter(entitys[i]);
-                        values.SetValue(value, i);
-                    }
-                    var parameter = new NpgsqlParameter($"@{column}", values);
-                    var elementType = GetClrTypeForProperty(propertyType);
-                    if (elementType.IsArray)
-                    {
-                        // 处理数组类型的逻辑
-                        var arrayElementType = elementType.GetElementType() ?? typeof(object);
-                        string[] arrayStrings = new string[entitys.Length];
-                        for (int i = 0; i < entitys.Length; i++)
-                        {
-                            if (getter(entitys[i]) is not Array arrayValue || arrayValue.Length == 0)
-                                arrayStrings[i] = "{}";
-                            else
-                            {
-                                List<string> elements = new List<string>();
-                                foreach (var item in arrayValue)
-                                {
-                                    if (item == null || item == DBNull.Value)
-                                        elements.Add("NULL");
-                                    else
-                                    {
-                                        string elementStr = item.ToString() ?? "";
-                                        elementStr = elementStr.Replace("\"", "\"\"");
-                                        elements.Add($"\"{elementStr}\"");
-                                    }
-                                }
-                                arrayStrings[i] = "{" + string.Join(",", elements) + "}";
-                            }
-                        }
-                        string type = GetPostgreSqlArrayType(arrayElementType);
-                        selectColumns.Add($"unnest(@{column})::{type} as {column}");
-                        parameter = new NpgsqlParameter($"@{column}", arrayStrings);
-                    }
-                    else
-                    {
-                        selectColumns.Add($"unnest(@{column}) as {column}");
-                    }
-                    var elementDbType = GetNpgsqlDbType(elementType);
-                    parameter.NpgsqlDbType = NpgsqlDbType.Array | elementDbType;
-                    parameters.Add(parameter);
-                }
-            }
-
-            string sql = $@" WITH {tmp} AS (
-                        SELECT {string.Join(", ", selectColumns)}
-                        )UPDATE {tableName} 
-                            SET {string.Join(", ", setClauses)}
-                            FROM {tmp}
-                            WHERE {string.Join(" AND ", whereConditions)}";
+            var commandBuilder = new PostgreSqlCteUpdateCommandBuilder<T>(_upadteMapping);
+            var commandDefinition = commandBuilder.Build(entitys, columns, tableName, tmp, expressionStr);
+            string sql = commandDefinition.Sql;
             await using var connection = await _postgreSql.GetConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync(token);
             try
             {
-                await using var command = new NpgsqlCommand(sql, connection, transaction);
-                command.Parameters.AddRange(parameters.ToArray());
+                await using var command = DbCommandExecution.CreateCommand(connection, sql, commandDefinition.Parameters, transaction);
                 int affected = await command.ExecuteNonQueryAsync(token);
                 if (affected != entitys.Length)
                 {

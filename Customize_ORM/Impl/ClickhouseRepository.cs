@@ -1,18 +1,15 @@
 ﻿using ClickHouse.Driver;
-using ClickHouse.Driver.ADO;
-using ClickHouse.Driver.ADO.Parameters;
 using Customize_ORM.Extensions;
 using Customize_ORM.Interfaces;
 using Customize_ORM.Interfaces.ConnectionFactory;
 using Customize_ORM.Models;
-using Dapper;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
+using Customize_ORM.Extensions.Sql;
 using System.Data;
 using System.Data.Common;
 using System.Linq.Expressions;
 using System.Reflection;
-using System.Reflection.Metadata;
 using System.Runtime.CompilerServices;
 
 namespace Customize_ORM.Impl
@@ -21,72 +18,45 @@ namespace Customize_ORM.Impl
     {
         private static readonly EntityMapping<T> _mapping = ObjectMapping<T>.MappingForInsert;
         private static readonly ObjectMapping<T>.DRowFactory _rowFactory = ObjectMapping<T>.RowFactory;
-        private static readonly List<Action<T, object>> _settersByOrder;
-        private static readonly Func<IDataRecord, T> _rowReader;
+        private static readonly Func<DbDataReader, T> _rowReader = EntityDataReaderMapper<T>.Create(_mapping);
         private static readonly ConcurrentDictionary<string, object> _projectionCache = new();
         private readonly ClickHouseClient _client = factory.GetClientAsync();
         private readonly ILogger<ClickhouseRepository<T>> _logger = logger;
 
-        static ClickhouseRepository()
+        private static readonly Func<DbParameter, DbParameter> _materializeClickHouseParameter = ClickHouseDialect.Materialize;
+
+        private DbCommand CreateCommand(DbConnection connection, string sql, IReadOnlyList<DbParameter>? parameters = null)
         {
-            // 按列顺序准备 Setter
-            _settersByOrder = new List<Action<T, object>>(_mapping.AllColumns.Length);
-            foreach (var col in _mapping.AllColumns)
-            {
-                if (_mapping.ValueSetters != null && _mapping.ValueSetters.TryGetValue(col, out var setter))
-                    _settersByOrder.Add(setter);
-            }
-            _rowReader = CreateRowReader();
+            return DbCommandExecution.CreateCommand(connection, sql, parameters, materializeParameter: _materializeClickHouseParameter);
         }
 
-        private static Func<IDataRecord, T> CreateRowReader()
+        private static ClickHouseQuerySqlBuilder<T> CreateQueryBuilder(string? tableName = null)
+            => new(_mapping, tableName);
+
+        private async Task<long> ExecuteScalarInt64Async(string sql, IReadOnlyList<DbParameter>? parameters, CancellationToken token)
         {
-            var recordParam = Expression.Parameter(typeof(IDataRecord), "record");
-            var entityVar = Expression.Variable(typeof(T), "entity");
-            var assignExprs = new List<Expression>
-            {
-                Expression.Assign(entityVar, Expression.New(typeof(T)))
-            };
-            for (int colIndex = 0; colIndex < _mapping.AllColumns.Length; colIndex++)
-            {
-                var column = _mapping.AllColumns[colIndex];
-                if (_mapping.ValueSetters != null && _mapping.ValueSetters.TryGetValue(column, out var setter))
-                {
-                    var getValueCall = Expression.Call(recordParam, nameof(IDataRecord.GetValue), null, Expression.Constant(colIndex));
-                    var isDbNull = Expression.Call(recordParam, nameof(IDataRecord.IsDBNull), null, Expression.Constant(colIndex));
-                    var valueExpr = Expression.Condition(isDbNull, Expression.Constant(null, typeof(object)), getValueCall);
-                    var callSetter = Expression.Invoke(Expression.Constant(setter), entityVar, valueExpr);
-                    assignExprs.Add(callSetter);
-                }
-            }
-            assignExprs.Add(entityVar);
-            var block = Expression.Block([entityVar], assignExprs);
-            return Expression.Lambda<Func<IDataRecord, T>>(block, recordParam).Compile();
+            await using var connection = _client.CreateConnection();
+            var result = await DbCommandExecution.ExecuteScalarAsync(connection, sql, parameters, token, materializeParameter: _materializeClickHouseParameter);
+            return Convert.ToInt64(result ?? 0);
         }
 
-        /// <summary>
-        /// 创建带参数的命令 
-        /// </summary>
-        /// <param name="sql">sql语句</param>
-        /// <param name="parameters">参数化数据</param>
-        /// <param name="existingConnection">外不传入连接（高频调用时使用）</param>
-        /// <returns></returns>
-        private ClickHouseCommand CreateCommand(
-             string sql,
-             List<DbParameter>? parameters, ClickHouseConnection? existingConnection = null)
+        private async Task<List<TResult>> ReadAllAsync<TResult>(
+            string sql,
+            IReadOnlyList<DbParameter>? parameters,
+            Func<DbDataReader, TResult> map,
+            CancellationToken token)
         {
-            var connection = existingConnection ?? _client.CreateConnection();
-            var command = connection.CreateCommand();
-            command.CommandText = sql;
-            
-            if (parameters != null)
+            await using var connection = _client.CreateConnection();
+            await using var command = CreateCommand(connection, sql, parameters);
+            await using var reader = await command.ExecuteReaderAsync(token);
+
+            var results = new List<TResult>();
+            while (await reader.ReadAsync(token))
             {
-                foreach (var item in parameters)
-                {
-                    command.Parameters.Add(item);
-                }
+                results.Add(map(reader));
             }
-            return command;
+
+            return results;
         }
 
         public async ValueTask<bool> BulkInsertAsync(
@@ -118,21 +88,16 @@ namespace Customize_ORM.Impl
         {
             try
             {
-                if (string.IsNullOrWhiteSpace(tableName))
-                    tableName = _mapping.TableName;
+                var queryBuilder = CreateQueryBuilder(tableName);
 
                 var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.ClickHouse);
                 if (expression != null)
                     sqlExpr.Where(expression);
 
                 var (whereClause, parameters) = sqlExpr.BuildWhereClause();
-                var sql = $"SELECT COUNT(*) FROM {tableName}";
-                if (!string.IsNullOrEmpty(whereClause))
-                    sql += $" WHERE {whereClause}";
+                var sql = queryBuilder.ApplyWhere(queryBuilder.Count(), whereClause);
 
-                using var cmd = CreateCommand(sql, parameters);
-                var result = await cmd.ExecuteScalarAsync(token);
-                return Convert.ToInt64(result ?? 0);
+                return await ExecuteScalarInt64Async(sql, parameters, token);
             }
             catch (Exception ex)
             {
@@ -152,33 +117,20 @@ namespace Customize_ORM.Impl
 
             try
             {
-                if (string.IsNullOrWhiteSpace(tableName))
-                    tableName = _mapping.TableName;
+                var queryBuilder = CreateQueryBuilder(tableName);
 
                 var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.ClickHouse);
                 if (expression != null)
                     sqlExpr.Where(expression);
 
-                // 获取 WHERE 子句和参数
                 var (whereClause, parameters) = sqlExpr.BuildWhereClause();
-                // 获取 ORDER BY（如果没有则使用主键）
-                var orderBy = sqlExpr.BuildOrderByClause();
-                if (string.IsNullOrEmpty(orderBy))
-                    orderBy = $"ORDER BY {_mapping.Key ?? _mapping.AllColumns.FirstOrDefault()}";
+                var orderBy = queryBuilder.ResolveOrderBy(sqlExpr.BuildOrderByClause());
+                var sql = queryBuilder.SelectAll();
+                sql = queryBuilder.ApplyWhere(sql, whereClause);
+                sql = queryBuilder.ApplyOrderBy(sql, orderBy);
+                sql = queryBuilder.ApplyLimit(sql, offset, pageSize);
 
-                // 构建完整 SQL（显式指定列顺序）
-                string columns = string.Join(", ", _mapping.AllColumns);
-                var sql = $"SELECT {columns} FROM {tableName}";
-                if (!string.IsNullOrEmpty(whereClause))
-                    sql += $" WHERE {whereClause}";
-                sql += $" {orderBy} LIMIT {offset}, {pageSize}";
-
-                using var cmd = CreateCommand(sql, parameters);
-                using var reader = await cmd.ExecuteReaderAsync(token);
-                var results = new List<T>();
-                while (await reader.ReadAsync(token))
-                    results.Add(_rowReader(reader));
-                return results;
+                return await ReadAllAsync(sql, parameters, _rowReader, token);
             }
             catch (Exception ex)
             {
@@ -191,22 +143,20 @@ namespace Customize_ORM.Impl
             string tableName = "",
             [EnumeratorCancellation] CancellationToken token = default)
         {
-            if (string.IsNullOrWhiteSpace(tableName))
-                tableName = _mapping.TableName;
+            var queryBuilder = CreateQueryBuilder(tableName);
 
             var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.ClickHouse);
             if (expression != null)
                 sqlExpr.Where(expression);
 
             var (whereClause, parameters) = sqlExpr.BuildWhereClause();
-            string columns = string.Join(", ", _mapping.AllColumns);
-            var sql = $"SELECT {columns} FROM {tableName} FINAL";
-            if (!string.IsNullOrEmpty(whereClause))
-                sql += $" WHERE {whereClause}";
-            sql += $" ORDER BY {_mapping.Key ?? _mapping.AllColumns.FirstOrDefault()}";
+            var sql = queryBuilder.SelectAll(final: true);
+            sql = queryBuilder.ApplyWhere(sql, whereClause);
+            sql = queryBuilder.ApplyOrderBy(sql);
 
-            using var cmd = CreateCommand(sql, parameters);
-            using var reader = await cmd.ExecuteReaderAsync(token);
+            await using var connection = _client.CreateConnection();
+            await using var cmd = CreateCommand(connection, sql, parameters);
+            await using var reader = await cmd.ExecuteReaderAsync(token);
             while (await reader.ReadAsync(token))
                 yield return _rowReader(reader);
         }
@@ -216,25 +166,24 @@ namespace Customize_ORM.Impl
             string tableName = "",
             [EnumeratorCancellation] CancellationToken token = default)
         {
-            if (string.IsNullOrWhiteSpace(tableName))
-                tableName = _mapping.TableName;
+            var queryBuilder = CreateQueryBuilder(tableName);
 
             var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.ClickHouse);
             if (expression != null)
                 sqlExpr.Where(expression);
 
             var (whereClause, parameters) = sqlExpr.BuildWhereClause();
-            var sql = $"SELECT {columnName} FROM {tableName} FINAL";
-            if (!string.IsNullOrEmpty(whereClause))
-                sql += $" WHERE {whereClause}";
+            var sql = queryBuilder.Select(columnName, final: true);
+            sql = queryBuilder.ApplyWhere(sql, whereClause);
 
-            using var cmd = CreateCommand(sql, parameters);
-            using var reader = await cmd.ExecuteReaderAsync(token);
+            await using var connection = _client.CreateConnection();
+            await using var cmd = CreateCommand(connection, sql, parameters);
+            await using var reader = await cmd.ExecuteReaderAsync(token);
             while (await reader.ReadAsync(token))
             {
                 // 读取当前行的第一列（索引0）
                 var rawValue = reader.IsDBNull(0) ? null : reader.GetValue(0);
-                yield return ConvertValue<TValue>(rawValue);
+                yield return DbRecordMapper.MapValue<TValue>(rawValue);
             }
         }
         public async ValueTask<IEnumerable<T>> QueryAsync(
@@ -242,10 +191,8 @@ namespace Customize_ORM.Impl
             string tableName = "",
             CancellationToken token = default)
         {
-            if (string.IsNullOrWhiteSpace(tableName))
-                tableName = _mapping.TableName;
-            string columns = string.Join(", ", _mapping.AllColumns);
-            var sql = $"SELECT {columns} FROM {tableName}  FINAL";
+            var queryBuilder = CreateQueryBuilder(tableName);
+            var sql = queryBuilder.SelectAll(final: true);
             try
             {
                 var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.ClickHouse);
@@ -253,17 +200,9 @@ namespace Customize_ORM.Impl
                     sqlExpr.Where(expression);
 
                 var (whereClause, parameters) = sqlExpr.BuildWhereClause();
+                sql = queryBuilder.ApplyWhere(sql, whereClause);
 
-
-                if (!string.IsNullOrEmpty(whereClause))
-                    sql += $" WHERE {whereClause}";
-
-                using var cmd = CreateCommand(sql, parameters);
-                using var reader = await cmd.ExecuteReaderAsync(token);
-                var results = new List<T>();
-                while (await reader.ReadAsync(token))
-                    results.Add(_rowReader(reader));
-                return results;
+                return await ReadAllAsync(sql, parameters, _rowReader, token);
             }
             catch (Exception ex)
             {
@@ -277,11 +216,10 @@ namespace Customize_ORM.Impl
             string? tableName = null,
             CancellationToken token = default) where TValue : class
         {
-            if (string.IsNullOrWhiteSpace(tableName))
-                tableName = _mapping.TableName;
             string sql = string.Empty;
             try
             {
+                var queryBuilder = CreateQueryBuilder(tableName);
                 var (projectionInfo, mapper) = GetOrCreateMapper(selector);
                 var columnNames = projectionInfo.ColumnNames;
                 var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.ClickHouse);
@@ -289,18 +227,11 @@ namespace Customize_ORM.Impl
                 var (whereClause, parameters) = sqlExpr.BuildWhereClause();
 
                 var columns = string.Join(", ", columnNames);
-                sql = $"SELECT {columns} FROM {tableName} FINAL";
-                if (!string.IsNullOrEmpty(whereClause))
-                    sql += $" WHERE {whereClause}";
-                sql += $" ORDER BY {_mapping.Key ?? _mapping.AllColumns.FirstOrDefault()}";
+                sql = queryBuilder.Select(columns, final: true);
+                sql = queryBuilder.ApplyWhere(sql, whereClause);
+                sql = queryBuilder.ApplyOrderBy(sql);
 
-                using var cmd = CreateCommand(sql, parameters);
-                using var reader = await cmd.ExecuteReaderAsync(token);
-                var results = new List<TValue>();
-                while (await reader.ReadAsync(token))
-                    results.Add(mapper(reader));
-
-                return results;
+                return await ReadAllAsync(sql, parameters, mapper, token);
             }
             catch (Exception ex)
             {
@@ -317,31 +248,21 @@ namespace Customize_ORM.Impl
             string sql = string.Empty;
             try
             {
-                if (string.IsNullOrWhiteSpace(tableName))
-                    tableName = _mapping.TableName;
+                var queryBuilder = CreateQueryBuilder(tableName);
 
-                // 构建 SQL
                 var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.ClickHouse);
                 if (filter != null)
                     sqlExpr.Where(filter);
                 var (whereClause, parameters) = sqlExpr.BuildWhereClause();
 
-                sql = $"SELECT {columnName} FROM {tableName} FINAL";
-                if (!string.IsNullOrEmpty(whereClause))
-                    sql += $" WHERE {whereClause}";
+                sql = queryBuilder.Select(columnName, final: true);
+                sql = queryBuilder.ApplyWhere(sql, whereClause);
 
-                using var cmd = CreateCommand(sql, parameters);
-                using var reader = await cmd.ExecuteReaderAsync(token);
-
-                var results = new List<TValue>();
-                while (await reader.ReadAsync(token))
-                {
-                    // 处理 DBNull 和类型转换
-                    var value = reader.IsDBNull(0) ? null : reader.GetValue(0);
-                    var converted = ConvertValue<TValue>(value);
-                    results.Add(converted);
-                }
-                return results;
+                return await ReadAllAsync(
+                    sql,
+                    parameters,
+                    reader => DbRecordMapper.MapValue<TValue>(reader.IsDBNull(0) ? null : reader.GetValue(0)),
+                    token);
             }
             catch (Exception ex)
             {
@@ -359,9 +280,7 @@ namespace Customize_ORM.Impl
             string? tableName = null,
             CancellationToken token = default) where TValue : class
         {
-            if (string.IsNullOrWhiteSpace(tableName))
-                tableName = _mapping.TableName;
-
+            var queryBuilder = CreateQueryBuilder(tableName);
             var (projectionInfo, mapper) = GetOrCreateMapper(selector);
             var columnNames = projectionInfo.ColumnNames;
             var columns = string.Join(", ", columnNames);
@@ -371,31 +290,20 @@ namespace Customize_ORM.Impl
                 sqlExpr.Where(filter);
             var (whereClause, parameters) = sqlExpr.BuildWhereClause();
 
-            // 总数查询
-            var countSql = $"SELECT COUNT(*) FROM {tableName} FINAL";
-            if (!string.IsNullOrEmpty(whereClause))
-                countSql += $" WHERE {whereClause}";
-            using var countCmd = CreateCommand(countSql, parameters);
-            var totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(token));
+            var countSql = queryBuilder.Count(final: true);
+            countSql = queryBuilder.ApplyWhere(countSql, whereClause);
+            var totalCount = await ExecuteScalarInt64Async(countSql, parameters, token);
 
             if (totalCount == 0)
                 return new PagedResult<TValue>([], pageIndex, pageSize, 0);
 
-            // 分页查询
             int offset = pageIndex * pageSize;
-            var dataSql = $"SELECT {columns} FROM {tableName} FINAL";
-            if (!string.IsNullOrEmpty(whereClause))
-                dataSql += $" WHERE {whereClause}";
-            var orderByClause = string.IsNullOrEmpty(orderBy)
-                ? $"ORDER BY {_mapping.Key ?? _mapping.AllColumns.FirstOrDefault()}"
-                : $"ORDER BY {orderBy}";
-            dataSql += $" {orderByClause} LIMIT {offset}, {pageSize}";
+            var dataSql = queryBuilder.Select(columns, final: true);
+            dataSql = queryBuilder.ApplyWhere(dataSql, whereClause);
+            dataSql = queryBuilder.ApplyOrderBy(dataSql, orderBy);
+            dataSql = queryBuilder.ApplyLimit(dataSql, offset, pageSize);
 
-            using var dataCmd = CreateCommand(dataSql, parameters);
-            using var reader = await dataCmd.ExecuteReaderAsync(token);
-            var items = new List<TValue>();
-            while (await reader.ReadAsync(token))
-                items.Add(mapper(reader));
+            var items = await ReadAllAsync(dataSql, parameters, mapper, token);
 
             return new PagedResult<TValue>(items, pageIndex, pageSize, totalCount);
         }
@@ -407,158 +315,58 @@ namespace Customize_ORM.Impl
             string? tableName = null,
             CancellationToken token = default)
         {
-            if (string.IsNullOrWhiteSpace(tableName))
-                tableName = _mapping.TableName;
-
+            var queryBuilder = CreateQueryBuilder(tableName);
             var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.ClickHouse);
             if (filter != null)
                 sqlExpr.Where(filter);
             var (whereClause, parameters) = sqlExpr.BuildWhereClause();
 
-            // 1. 获取总数（COUNT）
-            var countSql = $"SELECT COUNT(*) FROM {tableName} FINAL";
-            if (!string.IsNullOrEmpty(whereClause))
-                countSql += $" WHERE {whereClause}";
-            using var countCmd = CreateCommand(countSql, parameters);
-            var totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(token));
+            var countSql = queryBuilder.Count(final: true);
+            countSql = queryBuilder.ApplyWhere(countSql, whereClause);
+            var totalCount = await ExecuteScalarInt64Async(countSql, parameters, token);
 
             if (totalCount == 0)
                 return new PagedResult<TValue>([], pageIndex, pageSize, 0);
 
-            // 2. 分页获取数据
             int offset = pageIndex * pageSize;
-            var dataSql = $"SELECT {columnName} FROM {tableName} FINAL";
-            if (!string.IsNullOrEmpty(whereClause))
-                dataSql += $" WHERE {whereClause}";
-            dataSql += $" ORDER BY {_mapping.Key ?? _mapping.AllColumns.FirstOrDefault()} LIMIT {offset}, {pageSize}";
+            var dataSql = queryBuilder.Select(columnName, final: true);
+            dataSql = queryBuilder.ApplyWhere(dataSql, whereClause);
+            dataSql = queryBuilder.ApplyOrderBy(dataSql);
+            dataSql = queryBuilder.ApplyLimit(dataSql, offset, pageSize);
 
-            using var dataCmd = CreateCommand(dataSql, parameters);
-            using var reader = await dataCmd.ExecuteReaderAsync(token);
-            var items = new List<TValue>();
-            while (await reader.ReadAsync(token))
-            {
-                var value = reader.IsDBNull(0) ? null : reader.GetValue(0);
-                items.Add(ConvertValue<TValue>(value));
-            }
+            var items = await ReadAllAsync(
+                dataSql,
+                parameters,
+                reader => DbRecordMapper.MapValue<TValue>(reader.IsDBNull(0) ? null : reader.GetValue(0)),
+                token);
 
             return new PagedResult<TValue>(items, pageIndex, pageSize, totalCount);
         }
 
 
         #region 辅助方法
-        private static TValue ConvertValue<TValue>(object? value)
-        {
-            if (value == null || value == DBNull.Value)
-            {
-                // 如果目标类型是引用类型或 Nullable<T>，返回 default
-                if (typeof(TValue).IsClass || Nullable.GetUnderlyingType(typeof(TValue)) != null)
-                    return default!;
-                throw new InvalidOperationException($"Cannot convert NULL to non-nullable type {typeof(TValue)}");
-            }
-
-            Type targetType = typeof(TValue);
-            Type underlyingType = Nullable.GetUnderlyingType(targetType) ?? targetType;
-
-            // 如果类型完全匹配，直接返回（避免不必要的转换）
-            if (value.GetType() == underlyingType)
-                return (TValue)value;
-
-            // 枚举处理
-            if (underlyingType.IsEnum)
-            {
-                // 支持整数、字符串转换
-                if (value is string strVal)
-                    return (TValue)Enum.Parse(underlyingType, strVal);
-                // 尝试转换为枚举的基础类型（通常是 int）
-                var enumBase = Enum.GetUnderlyingType(underlyingType);
-                var convertedBase = Convert.ChangeType(value, enumBase);
-                return (TValue)Enum.ToObject(underlyingType, convertedBase);
-            }
-
-            // 字符串直接转换
-            if (value is string s)
-            {
-                if (underlyingType == typeof(Guid))
-                    return (TValue)(object)Guid.Parse(s);
-                if (underlyingType == typeof(DateTime))
-                    return (TValue)(object)DateTime.Parse(s);
-                // 其他类型通过 ChangeType（字符串通常支持 IConvertible）
-                return (TValue)Convert.ChangeType(s, underlyingType);
-            }
-
-            // 处理数值类型间的转换（通过 Convert 类）
-            // 注意：Convert.ChangeType 对于某些类型（如 ulong -> long）会失败，改用强制转换或更宽松的方式
-            try
-            {
-                // 尝试直接转换（部分CLR类型兼容）
-                return (TValue)Convert.ChangeType(value, underlyingType);
-            }
-            catch (InvalidCastException)
-            {
-                // 如果 ChangeType 失败，尝试通过字符串中转（效率稍低但兼容性好）
-                string intermediate = value.ToString()!;
-                return (TValue)Convert.ChangeType(intermediate, underlyingType);
-            }
-        }
         /// <summary>
         /// 创建从 IDataRecord 到 TResult 的映射委托
         /// </summary>
-        private Func<IDataRecord, TResult> CreateMapper<TResult>(ProjectionInfo info) where TResult : class
+        private static Func<DbDataReader, TResult> CreateMapper<TResult>(ProjectionInfo info) where TResult : class
         {
-            var recordParam = Expression.Parameter(typeof(IDataRecord), "record");
-            var resultVar = Expression.Variable(typeof(TResult), "result");
-
-            // 创建 TResult 实例
-            var newResult = Expression.New(typeof(TResult));
-            var assignments = new List<Expression> { Expression.Assign(resultVar, newResult) };
-
-            // 为每个属性生成赋值表达式
-            foreach (var (property, columnName) in info.PropertyAssignments)
+            return reader =>
             {
-                // 找到列索引（根据列名顺序，默认按 SELECT 顺序）
-                int columnIndex = Array.IndexOf(info.ColumnNames, columnName);
-                if (columnIndex < 0)
-                    continue;
+                var result = Activator.CreateInstance<TResult>();
+                foreach (var (property, columnName) in info.PropertyAssignments)
+                {
+                    int columnIndex = Array.IndexOf(info.ColumnNames, columnName);
+                    if (columnIndex < 0)
+                    {
+                        continue;
+                    }
 
-                // 读取值：record.GetValue(index)
-                var getValue = Expression.Call(recordParam, nameof(IDataRecord.GetValue), null, Expression.Constant(columnIndex));
-                var isDbNull = Expression.Call(recordParam, nameof(IDataRecord.IsDBNull), null, Expression.Constant(columnIndex));
+                    var rawValue = reader.IsDBNull(columnIndex) ? null : reader.GetValue(columnIndex);
+                    property.SetValue(result, DbRecordMapper.ConvertToType(rawValue, property.PropertyType));
+                }
 
-                // 处理 null 和类型转换
-                var propertyType = property.PropertyType;
-                var valueExpr = Expression.Condition(isDbNull,
-                    Expression.Constant(null, typeof(object)),
-                    getValue);
-
-                // 转换到目标类型（处理可空、枚举等）
-                var convertedValue = ClickhouseRepository<T>.ConvertToExpression(valueExpr, propertyType);
-
-                // result.Property = convertedValue
-                var propertyAccess = Expression.Property(resultVar, property);
-                var assign = Expression.Assign(propertyAccess, convertedValue);
-                assignments.Add(assign);
-            }
-
-            assignments.Add(resultVar);
-            var block = Expression.Block(new[] { resultVar }, assignments);
-            return Expression.Lambda<Func<IDataRecord, TResult>>(block, recordParam).Compile();
-        }
-        /// <summary>
-        /// 将表达式值转换为目标类型的表达式树
-        /// </summary>
-        private static Expression ConvertToExpression(Expression valueExpr, Type targetType)
-        {
-            var underlyingType = Nullable.GetUnderlyingType(targetType) ?? targetType;
-            if (underlyingType.IsEnum)
-            {
-                // 枚举转换：先转为枚举基础类型（int），再转为枚举
-                var intValue = Expression.Convert(valueExpr, typeof(int));
-                var enumValue = Expression.Convert(intValue, underlyingType);
-                return Expression.Convert(enumValue, targetType);
-            }
-
-            // 普通类型转换（包括可空类型）
-            return Expression.Convert(valueExpr, targetType);
+                return result;
+            };
         }
         /// <summary>
         /// 解析投影表达式，返回列名列表和属性赋值器的元数据
@@ -622,13 +430,13 @@ namespace Customize_ORM.Impl
         /// <typeparam name="TValue"></typeparam>
         /// <param name="selector"></param>
         /// <returns></returns>
-        private (ProjectionInfo, Func<IDataRecord, TValue>) GetOrCreateMapper<TValue>(
+        private (ProjectionInfo, Func<DbDataReader, TValue>) GetOrCreateMapper<TValue>(
        Expression<Func<T, TValue>> selector) where TValue : class
         {
             // 缓存键组合：目标类型全名 + 表达式的字符串形式
             string key = $"{typeof(TValue).FullName}_{selector.ToString()}";
             if (_projectionCache.TryGetValue(key, out object? cached) &&
-        cached is (ProjectionInfo proj, Func<IDataRecord, TValue> mapper))
+        cached is (ProjectionInfo proj, Func<DbDataReader, TValue> mapper))
             {
                 return (proj, mapper);
             }
