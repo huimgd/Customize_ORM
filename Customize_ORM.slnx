@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Customize_ORM/Customize_ORM.csproj" />
+  <Project Path="Test/Test.csproj" />
+</Solution>

@@ -1,0 +1,60 @@
+﻿using Customize_ORM.Extensions;
+using Customize_ORM.Impl;
+using Customize_ORM.Interfaces;
+using Customize_ORM.Models;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Test.Entitys;
+
+namespace Test
+{
+    internal class Program
+    {
+        static async Task Main(string[] args)
+        {
+            // 构建配置 (Configuration)
+            var configuration = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+                .Build();
+
+            // 创建服务集合 (ServiceCollection)
+            var services = new ServiceCollection();
+
+            // 注入日志服务 (因为 Extension.cs 中的连接工厂依赖 ILogger)
+            services.AddLogging(builder =>
+            {
+                builder.AddConsole(); // 添加控制台日志输出
+            });
+
+            // 调用您在 Extension.cs 中编写的扩展方法，注入数据库仓储/连接工厂
+            services.AddRepositories(configuration);
+            //注入postgresql数据库服务
+            services.AddSingleton(typeof(IBatchPostgresRepository<>), typeof(BatchPostgresRepository<>));
+            services.AddSingleton(typeof(IPostgresRepository<>), typeof(PostgresRepository<>));
+            //注入clickhouse数据库服务
+            services.AddSingleton(typeof(IClickhouseRepository<>), typeof(ClickhouseRepository<>));
+            // 构建服务提供者 (ServiceProvider)
+            var serviceProvider = services.BuildServiceProvider();
+
+            //初始化您的全局 AppSettings
+            var appSettings = new AppSettings();
+            // 将 appsettings.json 中的 FileSettings 节点绑定到对象
+            configuration.GetSection("FileSettings").Bind(appSettings.FileSettings);
+
+            // 调用 AppSettings 的静态初始化方法，传入配置和 ServiceProvider
+            AppSettings.Initialize(appSettings, serviceProvider);
+ 
+            
+
+          
+
+            Console.WriteLine($"临时目录配置为: {AppSettings.Current.FileSettings.TempDirectoryPath}");
+           // 通过局部的 serviceProvider 获取服务进行测试
+            var repository = serviceProvider.GetRequiredService<IPostgresRepository<AdminEntity>>();
+           long count = await repository.GetCountAsync(e => e.IsDeleted == false, CancellationToken.None);
+            Console.WriteLine($"未删除的管理员数量: {count}");
+        }
+    }
+}
