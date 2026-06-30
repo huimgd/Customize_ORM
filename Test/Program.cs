@@ -11,6 +11,9 @@ namespace Test
 {
     internal class Program
     {
+        /// <summary>
+        /// 程序入口，支持按参数执行指定回归集合或示例代码。
+        /// </summary>
         static async Task Main(string[] args)
         {
             //ClickHouseQuerySqlBuilderRegression.Run();
@@ -22,6 +25,13 @@ namespace Test
             //DbRecordMapperRegression.Run();
             //OwnedDbDataReaderRegression.Run();
             //SqlExpressionRegression.Run();
+
+            // 提供稳定的单项回归入口，便于在修复表达式问题时反复验证。
+            if (args.Contains("--run-sql-expression-regression", StringComparer.OrdinalIgnoreCase))
+            {
+                SqlExpressionRegression.Run();
+                return;
+            }
 
             if (args.Contains("--regression-only", StringComparer.OrdinalIgnoreCase))
             {

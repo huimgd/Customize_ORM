@@ -12,6 +12,9 @@ namespace Test
         private static readonly EntityMapping<AdminEntity> Mapping = ObjectMapping<AdminEntity>.MappingForInsert;
         private static readonly string SelectPrefix = $"SELECT {string.Join(", ", Mapping.AllColumns)} FROM {Mapping.TableName}";
 
+        /// <summary>
+        /// 运行 SqlExpression 相关回归测试，覆盖表达式翻译和参数化行为。
+        /// </summary>
         public static void Run()
         {
             var failures = new List<string>();
@@ -87,6 +90,215 @@ namespace Test
                         expectedWhereClause: "((remark IS NOT NULL AND remark LIKE @p1))",
                         expectedLiteralWhere: "((remark IS NOT NULL AND remark LIKE '%abc%'))",
                         expectedParameters: ["@p1=%abc%"]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: x.NullableInt.Value == 5",
+                () =>
+                {
+                    var expression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => x.NullableInt!.Value == 5);
+
+                    AssertSql(
+                        expression,
+                        expectedWhereClause: "(nullable_int = @p1)",
+                        expectedLiteralWhere: "(nullable_int = 5)",
+                        expectedParameters: ["@p1=5"]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: x.NullableInt.HasValue and !x.NullableInt.HasValue",
+                () =>
+                {
+                    var hasValueExpression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => x.NullableInt.HasValue);
+
+                    AssertSql(
+                        hasValueExpression,
+                        expectedWhereClause: "(nullable_int IS NOT NULL)",
+                        expectedLiteralWhere: "(nullable_int IS NOT NULL)",
+                        expectedParameters: []);
+
+                    var notHasValueExpression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => !x.NullableInt.HasValue);
+
+                    AssertSql(
+                        notHasValueExpression,
+                        expectedWhereClause: "(NOT (nullable_int IS NOT NULL))",
+                        expectedLiteralWhere: "(NOT (nullable_int IS NOT NULL))",
+                        expectedParameters: []);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: x.NullableInt != null && x.NullableInt.Value > 0",
+                () =>
+                {
+                    var expression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => x.NullableInt != null && x.NullableInt.Value > 0);
+
+                    AssertSql(
+                        expression,
+                        expectedWhereClause: "((nullable_int IS NOT NULL AND nullable_int > @p1))",
+                        expectedLiteralWhere: "((nullable_int IS NOT NULL AND nullable_int > 0))",
+                        expectedParameters: ["@p1=0"]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: string.IsNullOrWhiteSpace(x.Name) and negation",
+                () =>
+                {
+                    var expression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => string.IsNullOrWhiteSpace(x.Name));
+
+                    AssertSql(
+                        expression,
+                        expectedWhereClause: "((name IS NULL OR TRIM(name) = @p1))",
+                        expectedLiteralWhere: "((name IS NULL OR TRIM(name) = ''))",
+                        expectedParameters: ["@p1="]);
+
+                    var notExpression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => !string.IsNullOrWhiteSpace(x.Name));
+
+                    AssertSql(
+                        notExpression,
+                        expectedWhereClause: "(NOT ((name IS NULL OR TRIM(name) = @p1)))",
+                        expectedLiteralWhere: "(NOT ((name IS NULL OR TRIM(name) = '')))",
+                        expectedParameters: ["@p1="]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: string.IsNullOrEmpty(x.Name)",
+                () =>
+                {
+                    var expression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => string.IsNullOrEmpty(x.Name));
+
+                    AssertSql(
+                        expression,
+                        expectedWhereClause: "((name IS NULL OR name = @p1))",
+                        expectedLiteralWhere: "((name IS NULL OR name = ''))",
+                        expectedParameters: ["@p1="]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: x.Name.Trim().ToLower().Contains(\"abc\")",
+                () =>
+                {
+                    var expression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => x.Name!.Trim().ToLower().Contains("abc"));
+
+                    AssertSql(
+                        expression,
+                        expectedWhereClause: "(LOWER(TRIM(name)) LIKE @p1)",
+                        expectedLiteralWhere: "(LOWER(TRIM(name)) LIKE '%abc%')",
+                        expectedParameters: ["@p1=%abc%"]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: x.Status.ToString() == \"5\"",
+                () =>
+                {
+                    var expression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => x.Status.ToString() == "5");
+
+                    AssertSql(
+                        expression,
+                        expectedWhereClause: "(CAST(status AS TEXT) = @p1)",
+                        expectedLiteralWhere: "(CAST(status AS TEXT) = '5')",
+                        expectedParameters: ["@p1=5"]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: checked convert still resolves entity columns",
+                () =>
+                {
+                    var expression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => checked((long)x.Status) > 3L);
+
+                    AssertSql(
+                        expression,
+                        expectedWhereClause: "(status > @p1)",
+                        expectedLiteralWhere: "(status > 3)",
+                        expectedParameters: ["@p1=3"]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: x.Remark.ToString().Contains(\"abc\")",
+                () =>
+                {
+                    var expression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => x.Remark!.ToString().Contains("abc"));
+
+                    AssertSql(
+                        expression,
+                        expectedWhereClause: "(remark LIKE @p1)",
+                        expectedLiteralWhere: "(remark LIKE '%abc%')",
+                        expectedParameters: ["@p1=%abc%"]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: x.Name.ToUpper().StartsWith(\"ABC\")",
+                () =>
+                {
+                    var expression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => x.Name!.ToUpper().StartsWith("ABC"));
+
+                    AssertSql(
+                        expression,
+                        expectedWhereClause: "(UPPER(name) LIKE @p1)",
+                        expectedLiteralWhere: "(UPPER(name) LIKE 'ABC%')",
+                        expectedParameters: ["@p1=ABC%"]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: captured method calls still evaluate to parameters",
+                () =>
+                {
+                    var search = "  AbC  ";
+                    var expression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => x.Remark == search.Trim().ToLower());
+
+                    AssertSql(
+                        expression,
+                        expectedWhereClause: "(remark = @p1)",
+                        expectedLiteralWhere: "(remark = 'abc')",
+                        expectedParameters: ["@p1=abc"]);
+                });
+
+            RunCase(
+                failures,
+                "PostgreSQL: unsupported entity methods throw clear exceptions",
+                () =>
+                {
+                    AssertThrows<NotSupportedException>(() =>
+                        CreateExpression(DBType.PostgreSQL, x => CustomNormalize(x.Name!) == "abc"));
+
+                    AssertThrows<NotSupportedException>(() =>
+                        CreateExpression(DBType.PostgreSQL, x => x.Name!.Replace("a", "b") == "bbb"));
                 });
 
             RunCase(
@@ -322,6 +534,9 @@ namespace Test
             Console.WriteLine("SqlExpression regression harness passed.");
         }
 
+        /// <summary>
+        /// 为指定数据库方言构建带筛选条件的 SqlExpression。
+        /// </summary>
         private static SqlExpression<AdminEntity> CreateExpression(
             DBType dbType,
             Expression<Func<AdminEntity, bool>> predicate)
@@ -331,6 +546,9 @@ namespace Test
             return expression;
         }
 
+        /// <summary>
+        /// 断言 Where 子句、参数和最终 SQL 均符合预期。
+        /// </summary>
         private static void AssertSql(
             SqlExpression<AdminEntity> expression,
             string expectedWhereClause,
@@ -354,6 +572,9 @@ namespace Test
             }
         }
 
+        /// <summary>
+        /// 断言方言参数前缀符合预期。
+        /// </summary>
         private static void AssertDialectPrefix(DBType dbType, string expectedPrefix)
         {
             var actualPrefix = SqlDialect.For(dbType).ParameterPrefix;
@@ -365,6 +586,9 @@ namespace Test
             }
         }
 
+        /// <summary>
+        /// 断言参数上下文能生成正确的占位符和参数实例。
+        /// </summary>
         private static void AssertParameterContext(
             DBType dbType,
             object? value,
@@ -401,6 +625,9 @@ namespace Test
             }
         }
 
+        /// <summary>
+        /// 收集单项字符串断言不一致的信息。
+        /// </summary>
         private static void CollectMismatch(List<string> mismatches, string label, string expected, string actual)
         {
             if (!string.Equals(expected, actual, StringComparison.Ordinal))
@@ -410,6 +637,9 @@ namespace Test
             }
         }
 
+        /// <summary>
+        /// 断言完整 SQL 文本完全一致。
+        /// </summary>
         private static void AssertExactSql(string expected, string actual)
         {
             if (!string.Equals(expected, actual, StringComparison.Ordinal))
@@ -419,6 +649,9 @@ namespace Test
             }
         }
 
+        /// <summary>
+        /// 断言指定操作会抛出预期异常。
+        /// </summary>
         private static void AssertThrows<TException>(Action action)
             where TException : Exception
         {
@@ -434,6 +667,9 @@ namespace Test
             throw new InvalidOperationException($"Expected {typeof(TException).Name} but no exception was thrown.");
         }
 
+        /// <summary>
+        /// 收集参数序列不一致的信息。
+        /// </summary>
         private static void CollectSequenceMismatches(
             List<string> mismatches,
             string label,
@@ -457,24 +693,36 @@ namespace Test
             }
         }
 
+        /// <summary>
+        /// 提取 SQL 的 SELECT 前缀部分。
+        /// </summary>
         private static string ExtractSqlPrefix(string sql)
         {
             var whereIndex = sql.IndexOf(" WHERE ", StringComparison.Ordinal);
             return whereIndex >= 0 ? sql[..whereIndex] : sql;
         }
 
+        /// <summary>
+        /// 提取 SQL 的 WHERE 子句部分。
+        /// </summary>
         private static string ExtractSqlPredicate(string sql)
         {
             var whereIndex = sql.IndexOf(" WHERE ", StringComparison.Ordinal);
             return whereIndex >= 0 ? sql[whereIndex..] : string.Empty;
         }
 
+        /// <summary>
+        /// 将参数格式化为便于断言的文本。
+        /// </summary>
         private static string FormatParameter(DbParameter parameter)
         {
             var value = parameter.Value is null or DBNull ? "NULL" : parameter.Value.ToString();
             return $"{parameter.ParameterName}={value}";
         }
 
+        /// <summary>
+        /// 运行单个回归用例，并将失败信息收集到统一列表中。
+        /// </summary>
         private static void RunCase(List<string> failures, string name, Action assertion)
         {
             try
@@ -487,6 +735,14 @@ namespace Test
                 failures.Add($"[FAIL] {name}{Environment.NewLine}{ex}");
                 Console.WriteLine($"[FAIL] {name}");
             }
+        }
+
+        /// <summary>
+        /// 用于验证不支持的实体方法调用仍会明确报错。
+        /// </summary>
+        private static string CustomNormalize(string value)
+        {
+            return value.Trim().ToLowerInvariant();
         }
 
         private sealed class AdminProjection
