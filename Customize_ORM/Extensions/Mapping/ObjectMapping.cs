@@ -2,7 +2,7 @@
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Linq.Expressions;
 using System.Reflection;
-using System.Text;
+using System.Text.Json;
 
 namespace Customize_ORM.Extensions
 {
@@ -17,22 +17,16 @@ namespace Customize_ORM.Extensions
         private static DRowFactory CreateRowFactory()
         {
             var mapping = _insertMapping;
-            var getters = mapping.ValueGetters?.Values.ToArray() ?? [];
+            var getterItems = mapping.ValueGetters?.ToArray() ?? [];
 
             return entity =>
             {
-                var values = new object[getters.Length];
-                for (int i = 0; i < getters.Length; i++)
+                var values = new object[getterItems.Length];
+                for (int i = 0; i < getterItems.Length; i++)
                 {
-                    var value = getters[i](entity);
-                    values[i] = value switch
-                    {
-                        ulong ulongValue => (decimal)ulongValue,
-                        ulong[] ulongArray => Array.ConvertAll(ulongArray, x => (decimal)x),
-                        null => DBNull.Value,
-                        _ => value
-                    };
-
+                    var columnName = getterItems[i].Key;
+                    var value = getterItems[i].Value(entity);
+                    values[i] = ConvertValueForWrite(value, mapping.JsonbColumns.Contains(columnName));
                 }
                 return values;
             };
@@ -46,6 +40,7 @@ namespace Customize_ORM.Extensions
             Dictionary<string, Func<T, object?>> valueGetters;
             Dictionary<string, Action<T, object>>? valueSetters;
             Dictionary<string, Func<object?>> defaultValueGetters = new Dictionary<string, Func<object?>>(StringComparer.OrdinalIgnoreCase);
+            var jsonbColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var property in properties)
             {
                 if (property.IsDefined(typeof(IgnoreAttribute), true))
@@ -54,6 +49,10 @@ namespace Customize_ORM.Extensions
                 }
                 var columnName = (Attribute.GetCustomAttribute(property, typeof(ColumnAttribute), true) as ColumnAttribute)?.Name ?? Extension.ToSnakeCase(property.Name);
                 columnMap[columnName] = property;
+                if (IsJsonbColumn(property))
+                {
+                    jsonbColumns.Add(columnName);
+                }
                 var defaultValueAttr = property.GetCustomAttribute<DefaultValueAttribute>(true);
                 if (defaultValueAttr != null)
                 {
@@ -92,8 +91,71 @@ namespace Customize_ORM.Extensions
                 ValueGetters = valueGetters,
                 ValueSetters = valueSetters,
                 DefaultValueGetters = defaultValueGetters,
+                JsonbColumns = jsonbColumns,
             };
         }
+
+        /// <summary>
+        /// 判断属性是否声明为 PostgreSQL jsonb 字段。
+        /// </summary>
+        /// <param name="property">实体属性信息。</param>
+        /// <returns>声明为 jsonb 字段时返回 true。</returns>
+        public static bool IsJsonbColumn(PropertyInfo property)
+        {
+            ArgumentNullException.ThrowIfNull(property);
+
+            var columnAttr = property.GetCustomAttribute<ColumnAttribute>(true);
+            if (string.Equals(columnAttr?.TypeName, "jsonb", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var propertyType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+            return propertyType == typeof(JsonElement) || propertyType == typeof(JsonDocument);
+        }
+
+        /// <summary>
+        /// 将实体属性值转换为 PostgreSQL COPY 可写入的值。
+        /// </summary>
+        /// <param name="value">原始属性值。</param>
+        /// <param name="isJsonb">当前字段是否为 jsonb。</param>
+        /// <returns>转换后的数据库写入值。</returns>
+        public static object ConvertValueForWrite(object? value, bool isJsonb = false)
+        {
+            if (value is null)
+            {
+                return DBNull.Value;
+            }
+
+            if (isJsonb)
+            {
+                return ConvertJsonbValue(value);
+            }
+
+            return value switch
+            {
+                ulong ulongValue => (decimal)ulongValue,
+                ulong[] ulongArray => Array.ConvertAll(ulongArray, x => (decimal)x),
+                _ => value
+            };
+        }
+
+        /// <summary>
+        /// 将 jsonb 字段值转换为 Npgsql 可识别的 JSON 值。
+        /// </summary>
+        /// <param name="value">jsonb 字段原始值。</param>
+        /// <returns>JsonElement 值。</returns>
+        private static object ConvertJsonbValue(object value)
+        {
+            return value switch
+            {
+                JsonElement jsonElement => jsonElement.Clone(),
+                JsonDocument jsonDocument => jsonDocument.RootElement.Clone(),
+                string jsonText => JsonDocument.Parse(jsonText).RootElement.Clone(),
+                _ => JsonSerializer.SerializeToElement(value)
+            };
+        }
+
         private static Func<T, object?> CreatePropertyGetter(PropertyInfo property, Func<object?>? defaultValueGetter)
         {
             var param = Expression.Parameter(typeof(T), "x");

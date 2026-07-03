@@ -902,12 +902,14 @@ namespace Customize_ORM.Impl
             {
                 // 使用 _upadteMapping（已有的、经过验证的映射）
                 var getters = new List<Func<T, object?>>(columns.Length);
+                var isJsonbColumns = new List<bool>(columns.Length);
                 foreach (var col in columns)
                 {
                     // ValueGetters 字典已配置为忽略大小写
                     if (_upadteMapping.ValueGetters.TryGetValue(col, out var getter))
                     {
                         getters.Add(getter);
+                        isJsonbColumns.Add(_upadteMapping.JsonbColumns.Contains(col));
                     }
                     else
                     {
@@ -917,19 +919,14 @@ namespace Customize_ORM.Impl
                 }
 
                 var gettersArray = getters.ToArray();
+                var jsonbArray = isJsonbColumns.ToArray();
                 return entity =>
                 {
                     var values = new object[gettersArray.Length];
                     for (int i = 0; i < gettersArray.Length; i++)
                     {
                         var rawValue = gettersArray[i](entity);
-                        values[i] = rawValue switch
-                        {
-                            ulong ul => (decimal)ul,
-                            ulong[] ula => Array.ConvertAll(ula, x => (decimal)x),
-                            null => DBNull.Value,
-                            _ => rawValue
-                        };
+                        values[i] = ObjectMapping<T>.ConvertValueForWrite(rawValue, jsonbArray[i]);
                     }
                     return values;
                 };

@@ -39,6 +39,11 @@ namespace Customize_ORM.Extensions
         public Dictionary<string, Func<object?>> DefaultValueGetters { get; set; } = new();
 
         /// <summary>
+        /// jsonb 字段集合，用于 COPY 写入前识别需要 JSON 序列化的字段。
+        /// </summary>
+        public HashSet<string> JsonbColumns { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
         /// 值设定
         /// </summary>
         public Dictionary<string, Action<T, object>>? ValueSetters { get; set; }
@@ -64,6 +69,11 @@ namespace Customize_ORM.Extensions
             }
         }
 
+        /// <summary>
+        /// 获取属性对应的数据库字段名。
+        /// </summary>
+        /// <param name="property">实体属性信息。</param>
+        /// <returns>数据库字段名。</returns>
         public string GetColumnName(PropertyInfo property)
         {
             // 从 _entityMappingCache.PropertyMap 反向查找

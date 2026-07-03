@@ -1,4 +1,5 @@
 using NpgsqlTypes;
+using System.Text.Json;
 
 namespace Customize_ORM.Extensions.Sql
 {
@@ -80,7 +81,7 @@ namespace Customize_ORM.Extensions.Sql
                 _ when normalizedType == typeof(long) => NpgsqlDbType.Bigint,
                 _ when normalizedType == typeof(TimeSpan) => NpgsqlDbType.Interval,
                 _ when normalizedType == typeof(DateTimeOffset) => NpgsqlDbType.TimestampTz,
-                _ when normalizedType.FullName == "System.Text.Json.JsonElement" => NpgsqlDbType.Jsonb,
+                _ when normalizedType == typeof(JsonElement) || normalizedType == typeof(JsonDocument) => NpgsqlDbType.Jsonb,
                 _ => NpgsqlDbType.Text
             };
         }

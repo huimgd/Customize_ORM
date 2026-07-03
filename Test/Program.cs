@@ -26,6 +26,13 @@ namespace Test
             //OwnedDbDataReaderRegression.Run();
             //SqlExpressionRegression.Run();
 
+            // 提供 jsonb 映射转换的单项回归入口，避免执行真实数据库示例。
+            if (args.Contains("--run-jsonb-mapping-regression", StringComparer.OrdinalIgnoreCase))
+            {
+                JsonbMappingRegression.Run();
+                return;
+            }
+
             // 提供稳定的单项回归入口，便于在修复表达式问题时反复验证。
             if (args.Contains("--run-sql-expression-regression", StringComparer.OrdinalIgnoreCase))
             {

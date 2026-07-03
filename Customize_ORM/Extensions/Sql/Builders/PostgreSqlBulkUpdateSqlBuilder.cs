@@ -141,6 +141,11 @@ namespace Customize_ORM.Extensions.Sql
                 return "text";
             }
 
+            if (_mapping.JsonbColumns.Contains(columnName))
+            {
+                return "jsonb";
+            }
+
             var propertyType = property.PropertyType;
             if (propertyType.IsArray)
             {
