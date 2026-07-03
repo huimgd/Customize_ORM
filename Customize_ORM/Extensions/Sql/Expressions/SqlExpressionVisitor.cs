@@ -83,6 +83,11 @@ namespace Customize_ORM.Extensions.Sql
         {
             if (binary.NodeType == ExpressionType.AndAlso || binary.NodeType == ExpressionType.OrElse)
             {
+                if (TrySimplifyLogicalBinary(binary, out var simplifiedSql))
+                {
+                    return simplifiedSql;
+                }
+
                 var left = Translate(binary.Left);
                 var right = Translate(binary.Right);
                 var op = binary.NodeType == ExpressionType.AndAlso ? "AND" : "OR";
@@ -97,6 +102,44 @@ namespace Customize_ORM.Extensions.Sql
             var leftFragment = GetSqlValueFragment(binary.Left);
             var rightFragment = GetSqlValueFragment(binary.Right);
             return $"{leftFragment} {GetSqlOperator(binary.NodeType)} {rightFragment}";
+        }
+
+        /// <summary>
+        /// 尝试在翻译前折叠逻辑运算中的纯闭包布尔表达式，保留 C# 的短路语义。
+        /// </summary>
+        private bool TrySimplifyLogicalBinary(BinaryExpression binary, out string sql)
+        {
+            if (TryEvaluateBooleanOperand(binary.Left, out var leftValue))
+            {
+                sql = SimplifyLogicalBinaryByConstant(binary.NodeType, leftValue, binary.Right);
+                return true;
+            }
+
+            if (TryEvaluateBooleanOperand(binary.Right, out var rightValue))
+            {
+                sql = SimplifyLogicalBinaryByConstant(binary.NodeType, rightValue, binary.Left);
+                return true;
+            }
+
+            sql = string.Empty;
+            return false;
+        }
+
+        /// <summary>
+        /// 根据常量布尔值折叠逻辑表达式的另一侧。
+        /// </summary>
+        private string SimplifyLogicalBinaryByConstant(ExpressionType nodeType, bool constantValue, Expression otherExpression)
+        {
+            if (nodeType == ExpressionType.AndAlso)
+            {
+                return constantValue
+                    ? Translate(otherExpression)
+                    : _dialect.RenderLiteral(false);
+            }
+
+            return constantValue
+                ? _dialect.RenderLiteral(true)
+                : Translate(otherExpression);
         }
 
         /// <summary>
@@ -208,6 +251,37 @@ namespace Customize_ORM.Extensions.Sql
             }
 
             sql = string.Empty;
+            return false;
+        }
+
+        /// <summary>
+        /// 尝试将闭包中的 Nullable 成员访问退化为其底层可求值表达式。
+        /// </summary>
+        private static bool TryUnwrapEvaluableNullableMember(MemberExpression member, out Expression expression)
+        {
+            expression = null!;
+
+            if (member.Expression == null || ContainsEntityParameter(member.Expression))
+            {
+                return false;
+            }
+
+            if (member.Member.Name == nameof(Nullable<int>.HasValue) &&
+                IsNullableType(member.Expression.Type))
+            {
+                expression = Expression.NotEqual(
+                    UnwrapConvert(member.Expression),
+                    Expression.Constant(null, member.Expression.Type));
+                return true;
+            }
+
+            if (member.Member.Name == nameof(Nullable<int>.Value) &&
+                IsNullableType(member.Expression.Type))
+            {
+                expression = member.Expression;
+                return true;
+            }
+
             return false;
         }
 
@@ -405,6 +479,23 @@ namespace Customize_ORM.Extensions.Sql
         }
 
         /// <summary>
+        /// 尝试将不依赖实体参数的操作数计算为布尔值。
+        /// </summary>
+        private static bool TryEvaluateBooleanOperand(Expression expression, out bool value)
+        {
+            if (!ContainsEntityParameter(expression) &&
+                TryEvaluate(expression, out var evaluatedValue) &&
+                evaluatedValue is bool booleanValue)
+            {
+                value = booleanValue;
+                return true;
+            }
+
+            value = false;
+            return false;
+        }
+
+        /// <summary>
         /// 优先使用轻量路径计算本地表达式，避免不必要的编译。
         /// </summary>
         private static bool TryEvaluateWithoutCompilation(Expression expression, out object? value)
@@ -498,6 +589,12 @@ namespace Customize_ORM.Extensions.Sql
         /// </summary>
         private static bool TryEvaluateMemberAccess(MemberExpression memberExpression, out object? value)
         {
+            if (TryUnwrapEvaluableNullableMember(memberExpression, out var nullableExpression))
+            {
+                return TryEvaluateWithoutCompilation(nullableExpression, out value) ||
+                       TryEvaluate(nullableExpression, out value);
+            }
+
             object? target = null;
             if (memberExpression.Expression != null &&
                 !TryEvaluateWithoutCompilation(UnwrapConvert(memberExpression.Expression), out target))

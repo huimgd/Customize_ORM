@@ -291,6 +291,37 @@ namespace Test
 
             RunCase(
                 failures,
+                "PostgreSQL: captured nullable filters preserve short-circuit semantics",
+                () =>
+                {
+                    var emptyQuery = new CapturedQueryFilter();
+                    var emptyExpression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => !emptyQuery.StatusCode.HasValue || x.Status == emptyQuery.StatusCode.Value);
+
+                    AssertSql(
+                        emptyExpression,
+                        expectedWhereClause: "(true)",
+                        expectedLiteralWhere: "(true)",
+                        expectedParameters: []);
+
+                    var queryWithValue = new CapturedQueryFilter
+                    {
+                        StatusCode = 7
+                    };
+                    var valuedExpression = CreateExpression(
+                        DBType.PostgreSQL,
+                        x => !queryWithValue.StatusCode.HasValue || x.Status == queryWithValue.StatusCode.Value);
+
+                    AssertSql(
+                        valuedExpression,
+                        expectedWhereClause: "(status = @p1)",
+                        expectedLiteralWhere: "(status = 7)",
+                        expectedParameters: ["@p1=7"]);
+                });
+
+            RunCase(
+                failures,
                 "PostgreSQL: unsupported entity methods throw clear exceptions",
                 () =>
                 {
@@ -750,6 +781,11 @@ namespace Test
             public string? Remark { get; init; }
 
             public object? Status { get; init; }
+        }
+
+        private sealed class CapturedQueryFilter
+        {
+            public int? StatusCode { get; init; }
         }
     }
 }
