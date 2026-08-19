@@ -71,7 +71,9 @@ namespace Customize_ORM.Impl
                     objects.Add(_rowFactory(entity));
                 if (string.IsNullOrWhiteSpace(tableName))
                     tableName = _mapping.TableName;
-                long count = await _client.InsertBinaryAsync(tableName, _mapping.AllColumns, objects, cancellationToken: token);
+                //开启模式缓存，避免高频批量写入时重复拉取表结构
+                var insertOptions = new InsertOptions { UseSchemaCache = true };
+                long count = await _client.InsertBinaryAsync(tableName, _mapping.AllColumns, objects, insertOptions, token);
                 return true;
             }
             catch (Exception ex)

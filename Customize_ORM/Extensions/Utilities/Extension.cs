@@ -32,7 +32,8 @@ namespace Customize_ORM.Extensions
                 {
                     throw new InvalidOperationException($"Clickhouse Connection string 'ClickHouse' not found in configuration.");
                 }
-                return new ClickhouseConnectionFactory(connectionString);
+                var logger = sp.GetRequiredService<ILogger<ClickhouseConnectionFactory>>();
+                return new ClickhouseConnectionFactory(connectionString, logger);
             });
             return services;
         }
