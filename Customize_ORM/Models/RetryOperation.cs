@@ -45,6 +45,11 @@ namespace Customize_ORM.Models
         /// </summary>
         [Key(5)]
         public DateTimeOffset RetryTime { get; set; }
+        /// <summary>
+        /// 失败原因
+        /// </summary>
+        [Key(6)]
+        public string FailureReason { get; set; } =string.Empty;
 
     }
 }

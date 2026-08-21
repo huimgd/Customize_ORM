@@ -107,7 +107,7 @@ namespace Customize_ORM.Impl
             try
             {
                 ArgumentNullException.ThrowIfNull(operation, nameof(operation));
-                await _retryChannel.Writer.WriteAsync(operation,token);
+                await _retryChannel.Writer.WriteAsync(operation, token);
                 return true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -289,45 +289,25 @@ namespace Customize_ORM.Impl
                 updateColumns: columns,
                 additionalWhereClause: expressionStr,
                 sourcePredicate: "staging.batch_id = @batchId");
-
+            updateSql = AppendReturningIfRetry(updateSql, tableName, retryCount);
             await using var connection = await _postgreSql.GetConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync(token);
             try
             {
-                // 仅对本次事务关闭同步提交，其他会话不受影响
-                //using (var setCmd = new NpgsqlCommand("SET LOCAL synchronous_commit = off;", connection, transaction))
-                //{
-                //    await setCmd.ExecuteNonQueryAsync(token);
-                //}
-                await using var cmd = DbCommandExecution.CreateCommand(
-                    connection,
-                    updateSql,
-                    [new NpgsqlParameter("batchId", batchId)],
-                    transaction);
-                int affected = await cmd.ExecuteNonQueryAsync(token);
-                if (affected != entitys.Length)
-                {
-                    //操作未能全部成功，回滚并构造重试数据
-                    await transaction.RollbackAsync(token);
-                    _logger.LogWarning("Not all operations were successful！Entity:{type},Total Count:{totalCount},Success Count:{successCount} ,Function Name:{funName}", typeof(T).Name, entitys.Length, affected, nameof(StagingStrategyAsync));
-                    await _retryChannel.Writer.WriteAsync(lazyRetry.Value, token);
-                }
-                else
-                {
-                    await transaction.CommitAsync(token);
-                    _logger.LogInformation("{funName} {entityName}: DataCount{dataCount},Times{time}ms", nameof(StagingStrategyAsync), typeof(T).Name, entitys.Length, sw.ElapsedMilliseconds);
-                }
-
+                await ExecuteBatchUpdateAsync(connection, transaction, updateSql,
+                    cmd => cmd.Parameters.AddWithValue("batchId", batchId), entitys,
+                    columns, expressionStr, tableName, retryCount, nameof(StagingStrategyAsync),
+                    sw, lazyRetry, token);
             }
             catch (PostgresException pgEx) when (IsTransientError(pgEx))
             {
-                await transaction.RollbackAsync(token);
+                await SafeRollbackAsync(transaction, token);
                 await _retryChannel.Writer.WriteAsync(lazyRetry.Value, token);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 //不可重试的错误，记录日志并保存重试数据
-                await transaction.RollbackAsync(token);
+                await SafeRollbackAsync(transaction, token);
                 _logger.LogError(ex, "{funName} {typeName} DataCount: {dataCount}", nameof(StagingStrategyAsync), typeof(T).Name, entitys.Length);
                 if (retryCount > 0)
                 {
@@ -418,38 +398,26 @@ namespace Customize_ORM.Impl
                         }
                         await writer.CompleteAsync(token);
                     }
-                    ;
-
                     string updateSql = bulkSqlBuilder.BuildLegacyTemporaryUpdateSql(
                         targetTableName: tableName,
                         sourceTableName: tmp,
                         updateColumns: columns,
                         additionalWhereClause: expressionStr);
-                    await using var updateCommand = DbCommandExecution.CreateCommand(connection, updateSql, transaction: transaction);
-                    int affected = await updateCommand.ExecuteNonQueryAsync(token);
-                    if (affected != entitys.Length)
-                    {
-                        //操作未能全部成功，回滚并构造重试数据
-                        await transaction.RollbackAsync(token);
-                        _logger.LogWarning("Not all operations were successful！Entity:{type},Total Count:{totalCount},Success Count:{successCount} ,Function Name:{funName}", typeof(T).Name, entitys.Length, affected, nameof(TemporaryTableStrategyAsync));
-                        await _retryChannel.Writer.WriteAsync(lazyRetry.Value, token);
-                    }
-                    else
-                    {
-                        await transaction.CommitAsync(token);
-                        _logger.LogInformation("{funName} {entityName}: DataCount{dataCount},Times{time}ms", nameof(TemporaryTableStrategyAsync), typeof(T).Name, entitys.Length, sw.ElapsedMilliseconds);
-                    }
+                    updateSql = AppendReturningIfRetry(updateSql, tableName, retryCount);
+                    await ExecuteBatchUpdateAsync(connection, transaction, updateSql, 
+                        _ => { }, entitys, columns, expressionStr, tableName, retryCount,
+                        nameof(TemporaryTableStrategyAsync), sw, lazyRetry, token);
                 }
             }
             catch (PostgresException pgEx) when (IsTransientError(pgEx))
             {
-                await transaction.RollbackAsync(token);
+                await SafeRollbackAsync(transaction, token);
                 await _retryChannel.Writer.WriteAsync(lazyRetry.Value, token);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 //不可重试的错误，记录日志并保存重试数据
-                await transaction.RollbackAsync(token);
+                await SafeRollbackAsync(transaction, token);
                 _logger.LogError(ex, "{funName} {typeName} DataCount: {dataCount}", nameof(TemporaryTableStrategyAsync), typeof(T).Name, entitys.Length);
                 if (retryCount > 0)
                 {
@@ -496,25 +464,22 @@ namespace Customize_ORM.Impl
             string tmp = $"cte_{guidShort}{timestampShort}";
             var commandBuilder = new PostgreSqlCteUpdateCommandBuilder<T>(_upadteMapping);
             var commandDefinition = commandBuilder.Build(entitys, columns, tableName, tmp, expressionStr);
-            string sql = commandDefinition.Sql;
+            // 重试路径追加 RETURNING 主键，用于识别实际命中行，从而把已更新成功的数据从重试数据中过滤掉
+            string sql = AppendReturningIfRetry(commandDefinition.Sql, tableName, retryCount);
             await using var connection = await _postgreSql.GetConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync(token);
             try
             {
-                await using var command = DbCommandExecution.CreateCommand(connection, sql, commandDefinition.Parameters, transaction);
-                int affected = await command.ExecuteNonQueryAsync(token);
-                if (affected != entitys.Length)
-                {
-                    //操作未能全部成功，回滚并构造重试数据
-                    await transaction.RollbackAsync(token);
-                    _logger.LogWarning("Not all operations were successful！Entity:{type},Total Count:{totalCount},Success Count:{successCount} ,Function Name:{funName}", typeof(T).Name, entitys.Length, affected, nameof(CteStrategyAsync));
-                    await _retryChannel.Writer.WriteAsync(lazyRetry.Value, token);
-                }
-                else
-                {
-                    await transaction.CommitAsync(token);
-                    _logger.LogInformation("{funName} {entityName}: DataCount{dataCount},Times{time}ms", nameof(CteStrategyAsync), typeof(T).Name, entitys.Length, sw.ElapsedMilliseconds);
-                }
+                await ExecuteBatchUpdateAsync(connection, transaction, sql,
+                    command =>
+                    {
+                        // CTE 的数组参数需逐个挂到真正执行的命令上（ExecuteBatchUpdateAsync 内部会新建命令）
+                        foreach (var p in commandDefinition.Parameters)
+                        {
+                            command.Parameters.Add(p);
+                        }
+                    }, entitys, columns,
+                    expressionStr, tableName, retryCount, nameof(CteStrategyAsync), sw, lazyRetry, token);
             }
             catch (PostgresException pgEx) when (IsTransientError(pgEx))
             {
@@ -872,6 +837,183 @@ namespace Customize_ORM.Impl
         }
         #endregion
 
+        /// <summary>
+        /// 重试路径下为 UPDATE 语句追加 RETURNING 主键，用于识别实际命中行；正常路径原样返回以保留事务内短语句性能
+        /// </summary>
+        /// <param name="sql">原始 UPDATE 语句</param>
+        /// <param name="tableName">目标表名</param>
+        /// <param name="retryCount">当前重试次数（大于 0 才追加 RETURNING）</param>
+        /// <returns>追加 RETURNING 后的语句（正常路径返回原语句）</returns>
+        private static string AppendReturningIfRetry(string sql, string tableName, int retryCount)
+        {
+            return retryCount > 0
+                ? $"{sql} RETURNING {tableName}.{_upadteMapping.Key}"
+                : sql;
+        }
+        /// <summary>
+        /// 执行批量 UPDATE：正常路径不带 RETURNING 保持性能；重试路径带 RETURNING 识别实际命中行，避免状态迟滞导致整批死循环
+        /// </summary>
+        /// <param name="connection">数据库连接</param>
+        /// <param name="transaction">当前事务</param>
+        /// <param name="sql">UPDATE 语句（重试路径已追加 RETURNING 主键）</param>
+        /// <param name="configureParameters">向命令补充参数的委托（各策略参数不同）</param>
+        /// <param name="entitys">待更新实体</param>
+        /// <param name="columns">更新列</param>
+        /// <param name="expressionStr">自定义条件</param>
+        /// <param name="tableName">表名称</param>
+        /// <param name="retryCount">当前重试次数</param>
+        /// <param name="strategyName">策略名（用于日志）</param>
+        /// <param name="sw">耗时统计</param>
+        /// <param name="lazyRetry">整批重试数据（正常路径回滚时使用）</param>
+        /// <param name="token">取消令牌</param>
+        private async Task ExecuteBatchUpdateAsync(
+            NpgsqlConnection connection,
+            NpgsqlTransaction transaction,
+            string sql,
+            Action<NpgsqlCommand> configureParameters,
+            T[] entitys,
+            string[] columns,
+            string? expressionStr,
+            string tableName,
+            int retryCount,
+            string strategyName,
+            Stopwatch sw,
+            Lazy<RetryOperation<T>> lazyRetry,
+            CancellationToken token)
+        {
+            await using var command = new NpgsqlCommand(sql, connection, transaction);
+            configureParameters(command);
+            if (retryCount > 0)
+            {
+                // 重试路径：RETURNING 与 UPDATE 同语句原子返回实际命中主键，避免并发下误判
+                HashSet<object?> matchedKeys;
+                await using (var reader = await command.ExecuteReaderAsync(token))
+                {
+                    // 先完整读取并释放 reader，再提交事务，否则连接上仍有命令执行中
+                    matchedKeys = await ReadMatchedKeysAsync(reader, token);
+                }
+                await CompleteUpdateAsync(transaction, entitys.Length, matchedKeys.Count, matchedKeys, entitys, columns, expressionStr, tableName, retryCount, strategyName, sw, lazyRetry, token);
+            }
+            else
+            {
+                // 正常路径：不带 RETURNING，保持事务内短语句高性能
+                int affected = await command.ExecuteNonQueryAsync(token);
+                await CompleteUpdateAsync(transaction, entitys.Length, affected, null, entitys, columns, expressionStr, tableName, retryCount, strategyName, sw, lazyRetry, token);
+            }
+        }
+        /// <summary>
+        /// 汇总批量 UPDATE 结果：全部命中提交；正常路径未全部命中回滚整批重试；重试路径提交命中行并仅重试未命中行
+        /// </summary>
+        /// <param name="transaction">当前事务</param>
+        /// <param name="totalCount">整批实体数量</param>
+        /// <param name="matchedCount">实际命中数量</param>
+        /// <param name="matchedKeys">重试路径下实际命中的主键集合（正常路径为 null）</param>
+        /// <param name="entitys">待更新实体</param>
+        /// <param name="columns">更新列</param>
+        /// <param name="expressionStr">自定义条件</param>
+        /// <param name="tableName">表名称</param>
+        /// <param name="retryCount">当前重试次数</param>
+        /// <param name="strategyName">策略名（用于日志）</param>
+        /// <param name="sw">耗时统计</param>
+        /// <param name="lazyRetry">整批重试数据（正常路径回滚时使用）</param>
+        /// <param name="token">取消令牌</param>
+        private async Task CompleteUpdateAsync(
+            NpgsqlTransaction transaction,
+            int totalCount,
+            int matchedCount,
+            HashSet<object?>? matchedKeys,
+            T[] entitys,
+            string[] columns,
+            string? expressionStr,
+            string tableName,
+            int retryCount,
+            string strategyName,
+            Stopwatch sw,
+            Lazy<RetryOperation<T>> lazyRetry,
+            CancellationToken token)
+        {
+            if (matchedCount == totalCount)
+            {
+                // 全部命中，直接提交
+                await transaction.CommitAsync(token);
+                _logger.LogInformation("{funName} {entityName}: DataCount{dataCount},Times{time}ms", strategyName, typeof(T).Name, totalCount, sw.ElapsedMilliseconds);
+                return;
+            }
+
+            if (retryCount == 0)
+            {
+                // 正常路径：未全部命中，回滚整批并整体重试（保留现状语义，给状态迟滞一次补机会）
+                await SafeRollbackAsync(transaction, token);
+                lazyRetry.Value.FailureReason = "Not all operations were successful";
+                await _retryChannel.Writer.WriteAsync(lazyRetry.Value, token);
+                _logger.LogWarning("Not all operations were successful！Entity:{type},Total Count:{totalCount},Success Count:{successCount} ,Function Name:{funName}", typeof(T).Name, totalCount, matchedCount, strategyName);
+                return;
+            }
+
+            // 重试路径：提交已命中行，仅对未命中行构造新重试继续（受 MaxRetryCount 约束，避免整批死循环）
+            var unmatched = ComputeUnmatchedEntities(entitys, matchedKeys ?? []);
+            await transaction.CommitAsync(token);
+            if (unmatched.Count > 0)
+            {
+                var unmatchedRetry = new RetryOperation<T>
+                {
+                    Entitys = unmatched,
+                    UpdateColumns = columns,
+                    TableName = tableName,
+                    Expression = expressionStr,
+                    RetryCount = retryCount + 1,
+                    RetryTime = CalcNextRetryTime(retryCount + 1),
+                    FailureReason = "Not all operations were successful"
+                };
+                await _retryChannel.Writer.WriteAsync(unmatchedRetry, token);
+            }
+            _logger.LogWarning("Partial update! Entity:{type},Total Count:{totalCount},Success Count:{successCount},Skipped Count:{skippedCount} ,Function Name:{funName}", typeof(T).Name, totalCount, matchedCount, totalCount - matchedCount, strategyName);
+        }
+        /// <summary>
+        /// 安全回滚：命令失败后事务可能已中止或销毁，回滚异常不应掩盖原始错误
+        /// </summary>
+        /// <param name="transaction">待回滚事务</param>
+        /// <param name="token">取消令牌</param>
+        private async Task SafeRollbackAsync(NpgsqlTransaction transaction, CancellationToken token)
+        {
+            try
+            {
+                await transaction.RollbackAsync(token);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // 事务可能已中止/销毁，回滚失败不影响原始异常继续上报
+                _logger.LogDebug("Rollback failed: {message}", ex.Message);
+            }
+        }
+        /// <summary>
+        /// 根据实际命中主键筛选出未命中的实体，主键值按写入转换规则归一化，保证与数据库返回值可比较
+        /// </summary>
+        /// <param name="entitys">整批实体</param>
+        /// <param name="matchedKeys">数据库实际命中的主键集合</param>
+        /// <returns>未命中的实体列表</returns>
+        private static List<T> ComputeUnmatchedEntities(T[] entitys, HashSet<object?> matchedKeys)
+        {
+            var keyColumn = _upadteMapping.Key;
+            var getter = _upadteMapping.ValueGetters[keyColumn];
+            var isJsonb = _upadteMapping.JsonbColumns.Contains(keyColumn);
+            return entitys.Where(entity => !matchedKeys.Contains(ObjectMapping<T>.ConvertValueForWrite(getter(entity), isJsonb))).ToList();
+        }
+        /// <summary>
+        /// 读取 UPDATE ... RETURNING 返回的实际命中主键集合（与 UPDATE 同一语句完成，读取天然原子）
+        /// </summary>
+        /// <param name="reader">RETURNING 结果读取器，第一列为返回的主键</param>
+        /// <param name="token">取消令牌</param>
+        /// <returns>命中的主键集合</returns>
+        private static async Task<HashSet<object?>> ReadMatchedKeysAsync(NpgsqlDataReader reader, CancellationToken token)
+        {
+            var matchedKeys = new HashSet<object?>();
+            while (await reader.ReadAsync(token))
+            {
+                matchedKeys.Add(reader.GetValue(0));
+            }
+            return matchedKeys;
+        }
         /// <summary>
         /// 数据库瞬时错误
         /// 这种还可以重试

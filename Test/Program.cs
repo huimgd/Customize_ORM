@@ -21,6 +21,7 @@ namespace Test
             //PostgreSqlParameterFactoryRegression.Run();
             //PostgreSqlCteUpdateCommandBuilderRegression.Run();
             //PostgreSqlBulkUpdateSqlBuilderRegression.Run();
+            //BatchPostgresRepositoryUpdateRetryRegression.Run();
             //EntityDataReaderMapperRegression.Run();
             //DbRecordMapperRegression.Run();
             //OwnedDbDataReaderRegression.Run();
@@ -42,6 +43,13 @@ namespace Test
 
             if (args.Contains("--regression-only", StringComparer.OrdinalIgnoreCase))
             {
+                return;
+            }
+
+            // 批量更新重试逻辑（RETURNING 拼接、未命中过滤）的纯逻辑回归，不连接真实数据库。
+            if (args.Contains("--run-batch-update-retry-regression", StringComparer.OrdinalIgnoreCase))
+            {
+                BatchPostgresRepositoryUpdateRetryRegression.Run();
                 return;
             }
 
