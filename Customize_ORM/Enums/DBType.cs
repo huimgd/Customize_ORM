@@ -8,5 +8,6 @@
         ClickHouse = 1,
         PostgreSQL = 2,
         MySQL = 3,
+        Xugu = 4,
     }
 }

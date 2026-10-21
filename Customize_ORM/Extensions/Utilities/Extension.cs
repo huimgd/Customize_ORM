@@ -26,7 +26,7 @@ namespace Customize_ORM.Extensions
             });
             //注入clickhouse
             services.AddSingleton<IChConnectionFactory>(sp =>
-            { 
+            {
                 var connectionString = configuration.GetSection("ClickHouse").Value;
                 if (string.IsNullOrEmpty(connectionString))
                 {
@@ -34,6 +34,16 @@ namespace Customize_ORM.Extensions
                 }
                 var logger = sp.GetRequiredService<ILogger<ClickhouseConnectionFactory>>();
                 return new ClickhouseConnectionFactory(connectionString, logger);
+            });
+            //注入虚谷（配置在单例委托内才求值，未配置虚谷的存量应用初始化不受影响）
+            services.AddSingleton<IXuguConnectionFactory>(sp =>
+            {
+                var connectionString = configuration.GetSection("Xugu").Value;
+                if (string.IsNullOrEmpty(connectionString))
+                {
+                    throw new InvalidOperationException($"Xugu Connection string 'Xugu' not found in configuration.");
+                }
+                return new XuguConnectionFactory(connectionString);
             });
             return services;
         }

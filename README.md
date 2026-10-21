@@ -1,8 +1,8 @@
 # Customize_ORM
 
-> 一个基于表达式树的轻量级自定义 ORM，支持 **ClickHouse / PostgreSQL / MySQL**，提供仓储化 API、SqlDialect 方言体系、混合缓存与文件工具，并内置不依赖真实数据库的回归测试。
+> 一个基于表达式树的轻量级自定义 ORM，支持 **ClickHouse / PostgreSQL / MySQL / XuguDB（虚谷）**，提供仓储化 API、SqlDialect 方言体系、混合缓存与文件工具，并内置不依赖真实数据库的回归测试。
 
-> A lightweight expression-tree-based custom ORM supporting **ClickHouse / PostgreSQL / MySQL**, with repository-style APIs, SQL dialect abstraction, hybrid caching, file utilities, and DB-free regression tests built in.
+> A lightweight expression-tree-based custom ORM supporting **ClickHouse / PostgreSQL / MySQL / XuguDB**, with repository-style APIs, SQL dialect abstraction, hybrid caching, file utilities, and DB-free regression tests built in.
 
 ---
 
@@ -12,10 +12,11 @@
   - 通过 `Expression<Func<T, bool>>` 构建 `WHERE`、`ORDER BY`、分页与投影，自动参数化。
   - Fluent API：`Where` / `AndWhere` / `OrWhere` / `OrderBy` / `OrderByDescending` / `Page` / `Select` / `First`。
 - **多数据库方言** / Multi-database dialects
-  - `SqlDialect.For(DBType)` 统一处理参数前缀、分页语法与差异：`ClickHouse`、`PostgreSQL`、`MySQL`。
+  - `SqlDialect.For(DBType)` 统一处理参数前缀、分页语法与差异：`ClickHouse`、`PostgreSQL`、`MySQL`、`Xugu`。
 - **仓储化接口** / Repository-style interfaces
   - `IPostgresRepository<T>` / `IBatchPostgresRepository<T>`：插入、更新、批量更新/插入、流式查询、计数、原生 SQL。
   - `IClickhouseRepository<T>`：批量插入、查询/分页/投影/流式查询、计数。
+  - `IXuguRepository<T>` / `IBatchXuguRepository<T>`：与 PostgreSQL 仓储能力对齐；批量插入走分批多值 `INSERT ... VALUES(...)(...)`，批量更新走 staging/TEMPORARY 表 `UPDATE ... FROM`，流式查询走服务端游标（`Use_Server_Cursor`）。
 - **实体映射** / Entity mapping
   - 特性：`[Table]`、`[Index]`、`[PartitionKey]`、`[Ignore]`、`[DefaultValue]`、`[DateTimeDefaultValue]`。
   - 驼峰 ⇄ 蛇形自动转换、JSONB 类型映射、MessagePack 序列化支持。
@@ -57,6 +58,7 @@ git clone git@github.com:huimgd/Customize_ORM.git
 {
   "Database": "Host=127.0.0.1;Port=5432;Username=postgres;Password=your_password;Database=your_db",
   "ClickHouse": "Compress=True;CheckCompressedHash=False;Compressor=lz4;Host=127.0.0.1;Port=9123;Database=default;User=default;Password=your_password;Timeout=10",
+  "Xugu": "IP=127.0.0.1;PORT=5138;DB=SYSTEM;User=SYSDBA;PWD=SYSDBA;AUTO_COMMIT=on;CHAR_SET=GBK",
   "FileSettings": {
     "TempDirectoryPath": "Temp"
   }
@@ -72,6 +74,9 @@ services.AddSingleton(typeof(IBatchPostgresRepository<>), typeof(BatchPostgresRe
 services.AddSingleton(typeof(IPostgresRepository<>), typeof(PostgresRepository<>));
 // ClickHouse
 services.AddSingleton(typeof(IClickhouseRepository<>), typeof(ClickhouseRepository<>));
+// Xugu（虚谷）
+services.AddSingleton(typeof(IBatchXuguRepository<>), typeof(BatchXuguRepository<>));
+services.AddSingleton(typeof(IXuguRepository<>), typeof(XuguRepository<>));
 ```
 
 ### 4. 定义实体 / Define an entity
@@ -121,6 +126,25 @@ var items = await repo.QueryAsync(e => e.IsDeleted == false);
 await repo.UpdateAsync(entity, columns: new[] { "Name" }, CancellationToken.None);
 ```
 
+**Xugu（虚谷）**
+
+```csharp
+var repo = serviceProvider.GetRequiredService<IBatchXuguRepository<AdminEntity>>();
+
+// 批量插入（分批多值 INSERT + 事务）
+await repo.BulkInsertAsync(admins);
+
+// 批量更新（非实时，staging/临时表/重试通道自动分派）
+await repo.BulkUpdateAsync(entity, columns: new[] { "Name" }, CancellationToken.None, partition: "2026102110");
+
+// 流式查询（服务端游标）
+await using var conn = await repo.GetConnectionAsync();
+await foreach (var item in repo.QueryStreamAsync(conn, e => e.IsDeleted == false))
+{
+    Console.WriteLine(item?.Id);
+}
+```
+
 ---
 
 ## 项目结构 / Project Structure
@@ -161,11 +185,12 @@ Customize_ORM/
 dotnet run --project Test -- --regression-only
 ```
 
-单项回归入口（如 SQL 表达式、JSONB 映射）：
+单项回归入口（如 SQL 表达式、JSONB 映射、虚谷方言）：
 
 ```bash
 dotnet run --project Test -- --run-sql-expression-regression
 dotnet run --project Test -- --run-jsonb-mapping-regression
+dotnet run --project Test -- --run-xugu-regressions
 ```
 
 ---
@@ -177,6 +202,7 @@ dotnet run --project Test -- --run-jsonb-mapping-regression
 | .NET 10 | 目标框架 |
 | ClickHouse.Driver 1.2.0 | ClickHouse 驱动 |
 | Npgsql 10.x | PostgreSQL 驱动 |
+| XuguClientCore 3.3.4 | XuguDB（虚谷）驱动，声明占位符 `:name`、批量多值 INSERT 与服务端游标 |
 | MessagePack 3.x | 二进制序列化 |
 | IdGen 3.x | ID 生成 |
 | NLog 6.x | 日志 |

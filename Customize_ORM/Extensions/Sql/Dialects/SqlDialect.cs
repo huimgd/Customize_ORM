@@ -11,6 +11,7 @@ namespace Customize_ORM.Extensions.Sql
         private static readonly SqlDialect PostgreSql = new PostgreSqlDialect();
         private static readonly SqlDialect ClickHouse = new ClickHouseDialect();
         private static readonly SqlDialect MySql = new MySqlDialect();
+        private static readonly SqlDialect Xugu = new XuguDialect();
 
         /// <summary>
         /// 获取当前方言使用的参数前缀。
@@ -180,6 +181,7 @@ namespace Customize_ORM.Extensions.Sql
             DBType.PostgreSQL => PostgreSql,
             DBType.ClickHouse => ClickHouse,
             DBType.MySQL => MySql,
+            DBType.Xugu => Xugu,
             _ => throw new NotSupportedException($"Database type {dbType} not supported")
         };
     }

@@ -14,6 +14,7 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.9" />
     <PackageReference Include="NLog" Version="6.1.3" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="XuguClientCore" Version="3.3.4" />
   </ItemGroup>
 
 </Project>

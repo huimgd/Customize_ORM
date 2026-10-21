@@ -22,6 +22,10 @@ namespace Test
             //PostgreSqlCteUpdateCommandBuilderRegression.Run();
             //PostgreSqlBulkUpdateSqlBuilderRegression.Run();
             //BatchPostgresRepositoryUpdateRetryRegression.Run();
+            //XuguQuerySqlBuilderRegression.Run();
+            //XuguParameterFactoryRegression.Run();
+            //XuguBulkUpdateSqlBuilderRegression.Run();
+            //BatchXuguRepositoryUpdateRetryRegression.Run();
             //EntityDataReaderMapperRegression.Run();
             //DbRecordMapperRegression.Run();
             //OwnedDbDataReaderRegression.Run();
@@ -38,6 +42,16 @@ namespace Test
             if (args.Contains("--run-sql-expression-regression", StringComparer.OrdinalIgnoreCase))
             {
                 SqlExpressionRegression.Run();
+                return;
+            }
+
+            // 虚谷全量纯逻辑回归：SQL 构建器 + 参数工厂 + 批量重试，不连接真实数据库。
+            if (args.Contains("--run-xugu-regressions", StringComparer.OrdinalIgnoreCase))
+            {
+                XuguQuerySqlBuilderRegression.Run();
+                XuguParameterFactoryRegression.Run();
+                XuguBulkUpdateSqlBuilderRegression.Run();
+                BatchXuguRepositoryUpdateRetryRegression.Run();
                 return;
             }
 

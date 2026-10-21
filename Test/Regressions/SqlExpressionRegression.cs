@@ -21,12 +21,13 @@ namespace Test
 
             RunCase(
                 failures,
-                "Dialect prefixes are available for PostgreSQL, ClickHouse, and MySQL",
+                "Dialect prefixes are available for PostgreSQL, ClickHouse, MySQL, and Xugu",
                 () =>
                 {
                     AssertDialectPrefix(DBType.PostgreSQL, "@");
                     AssertDialectPrefix(DBType.ClickHouse, "@");
                     AssertDialectPrefix(DBType.MySQL, "@");
+                    AssertDialectPrefix(DBType.Xugu, ":");
                 });
 
             RunCase(
@@ -58,6 +59,13 @@ namespace Test
                         value: null,
                         expectedName: "@p1",
                         expectedValue: null);
+
+                    // 虚谷走 :name 命名绑定；参数对象由 XuguDialect 创建并保留 : 前缀
+                    AssertParameterContext(
+                        DBType.Xugu,
+                        value: 123,
+                        expectedName: ":p1",
+                        expectedValue: 123);
                 });
 
             RunCase(

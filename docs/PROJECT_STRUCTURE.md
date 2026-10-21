@@ -17,11 +17,11 @@
 
 ## SQL 内部组件 `Customize_ORM/Extensions/Sql`
 
-- `Builders/`：数据库相关 SQL 片段构建器，例如 PostgreSQL 批量更新、CTE 更新和 ClickHouse 查询 SQL。
-- `Dialects/`：数据库方言差异，包括参数前缀、分页语法和参数创建。
+- `Builders/`：数据库相关 SQL 片段构建器，例如 PostgreSQL 批量更新、CTE 更新、ClickHouse 查询 SQL 与 Xugu 查询/批量更新 SQL。
+- `Dialects/`：数据库方言差异，包括参数前缀、分页语法和参数创建（Xugu 采用 `:name` 占位符）。
 - `Execution/`：命令创建、参数挂载和读取器生命周期管理。
 - `Expressions/`：表达式树访问器与参数上下文。
-- `Mapping/`：数据库记录到标量、DTO、实体的映射，以及 PostgreSQL 参数/类型归一化。
+- `Mapping/`：数据库记录到标量、DTO、实体的映射，以及 PostgreSQL/Xugu 参数与类型归一化。
 
 ## 测试项目 `Test`
 
