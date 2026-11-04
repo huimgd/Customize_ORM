@@ -1,11 +1,12 @@
 using Customize_ORM.Extensions;
+using Customize_ORM.Interfaces.Sql;
 
 namespace Customize_ORM.Extensions.Sql
 {
     /// <summary>
     /// PostgreSQL 批量更新 SQL 构建器，统一生成 staging 表、临时表和 UPDATE FROM 语句。
     /// </summary>
-    internal sealed class PostgreSqlBulkUpdateSqlBuilder<T>
+    internal sealed class PostgreSqlBulkUpdateSqlBuilder<T> : IBulkUpdateSqlBuilder<T>
     {
         private readonly EntityMapping<T> _mapping;
 

@@ -1,4 +1,5 @@
 using ClickHouse.Driver.ADO.Parameters;
+using Customize_ORM.Enums;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
@@ -7,6 +8,8 @@ namespace Customize_ORM.Extensions.Sql
 {
     public sealed class ClickHouseDialect : SqlDialect
     {
+        public override DBType DbType => DBType.ClickHouse;
+
         public override string ParameterPrefix => "@";
 
         public override object? NormalizeParameterValue(object? value)
@@ -16,6 +19,21 @@ namespace Customize_ORM.Extensions.Sql
 
         protected override DbParameter CreateParameterCore(string name, object? value)
             => new ClickHousePlaceholderParameter(name, value);
+
+        /// <summary>
+        /// ClickHouse 无事务性删除语义，不支持按主键删除。
+        /// </summary>
+        public override string BuildDeleteByKeysSql(
+            string tableName,
+            string keyColumn,
+            IReadOnlyList<object?> keyValues,
+            Type keyType,
+            out List<DbParameter> parameters)
+        {
+            parameters = [];
+            throw new NotSupportedException(
+                $"ClickHouse 不支持按主键删除（{tableName}.{keyColumn}），请改用 ALTER TABLE ... DELETE 或重建表。");
+        }
 
         internal static ClickHouseDbParameter Materialize(DbParameter parameter)
         {

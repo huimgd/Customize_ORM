@@ -1,6 +1,8 @@
+using Customize_ORM.Interfaces.Sql;
 using Npgsql;
 using NpgsqlTypes;
 using System.Data;
+using System.Data.Common;
 
 namespace Customize_ORM.Extensions.Sql
 {
@@ -9,6 +11,14 @@ namespace Customize_ORM.Extensions.Sql
     /// </summary>
     internal static class PostgreSqlParameterFactory
     {
+        /// <summary>
+        /// 对外以 <see cref="IParameterFactory"/> 形态暴露的实例。
+        /// </summary>
+        public static IParameterFactory Factory { get; } = new InstanceAdapter();
+
+        /// <summary>
+        /// 创建单个绑定参数。
+        /// </summary>
         public static NpgsqlParameter Create(string name, object? value, Type propertyType)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(name);
@@ -183,6 +193,18 @@ namespace Customize_ORM.Extensions.Sql
             return normalizedType == typeof(ulong)
                 ? typeof(decimal)
                 : normalizedType;
+        }
+
+        /// <summary>
+        /// 静态工具方法到 <see cref="IParameterFactory"/> 的适配，供方言层统一调用。
+        /// </summary>
+        private sealed class InstanceAdapter : IParameterFactory
+        {
+            public DbParameter Create(string name, object? value, Type propertyType)
+                => PostgreSqlParameterFactory.Create(name, value, propertyType);
+
+            public DbParameter CreateBulkArray(string name, IReadOnlyList<object?> values, Type propertyType)
+                => PostgreSqlParameterFactory.CreateBulkArray(name, values, propertyType);
         }
     }
 }

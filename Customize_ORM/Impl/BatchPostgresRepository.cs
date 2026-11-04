@@ -2,12 +2,12 @@
 using Customize_ORM.Extensions;
 using Customize_ORM.Extensions.Sql;
 using Customize_ORM.Interfaces;
-using Customize_ORM.Interfaces.ConnectionFactory;
 using Customize_ORM.Models;
 using MessagePack;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using System.Collections.Concurrent;
+using System.Data.Common;
 using System.Diagnostics;
 using System.Linq.Expressions;
 using System.Threading.Channels;
@@ -18,7 +18,7 @@ namespace Customize_ORM.Impl
     /// 数据库批量操作类
     /// </summary>
     /// <typeparam name="T"></typeparam>
-    public class BatchPostgresRepository<T> : PostgresRepository<T>, IBatchPostgresRepository<T> where T : class
+    public class BatchPostgresRepository<T> : PostgresRepository<T>, IBatchUpdateRepository<T>, IBulkInsertRepository<T> where T : class
     {
         private readonly HybridCache<T> _insertChannel;
         private readonly HybridCache<BatchOperation<T>> _updateChannel;
@@ -35,7 +35,7 @@ namespace Customize_ORM.Impl
         private readonly TimeSpan _fileRetryInterval = TimeSpan.FromMinutes(10);
         private static readonly ConcurrentDictionary<string, Func<T, object[]>> _rowFactoryCache = new();
         private static readonly SemaphoreSlim _stagingTableLock = new(1, 1);
-        public BatchPostgresRepository(IPgConnectionFactory postgreSql, ILogger<PostgresRepository<T>> logger) : base(postgreSql, logger)
+        public BatchPostgresRepository(IDbConnectionFactory postgreSql, ILogger<PostgresRepository<T>> logger) : base(postgreSql, logger)
         {
             _stagingTableName = $"staging_{_tableName}";
             _backupFilePath = Path.Combine(Directory.GetCurrentDirectory(), AppSettings.Current.FileSettings.TempDirectoryPath, "PostgresRepository", typeof(T).Name);
@@ -139,10 +139,10 @@ namespace Customize_ORM.Impl
                     {
                         tableName = _tableName;
                     }
-                    sql = $"COPY {tableName} ({string.Join(",", _upadteMapping.AllColumns)}) FROM STDIN (FORMAT BINARY)";
-                    using var connection = await _postgreSql.GetConnectionAsync();
+                    sql = $"COPY {tableName} ({string.Join(",", _updateMapping.AllColumns)}) FROM STDIN (FORMAT BINARY)";
+                    using var connection = await _connectionFactory.OpenConnectionAsync();
                     ArgumentNullException.ThrowIfNull(connection, nameof(connection));
-                    await using var writer = await connection.BeginBinaryImportAsync(sql, CancellationToken.None);
+                    await using var writer = await BeginBinaryImportAsync(connection, sql, CancellationToken.None);
 
                     foreach (var entity in entitys)
                     {
@@ -227,9 +227,9 @@ namespace Customize_ORM.Impl
             try
             {
                 if (_stagingTableChecked) return;
-                var bulkSqlBuilder = new PostgreSqlBulkUpdateSqlBuilder<T>(_upadteMapping);
+                var bulkSqlBuilder = new PostgreSqlBulkUpdateSqlBuilder<T>(_updateMapping);
                 var createSql = bulkSqlBuilder.BuildCreateStagingTableSql(_stagingTableName);
-                await using var conn = await _postgreSql.GetConnectionAsync();
+                await using var conn = await _connectionFactory.OpenConnectionAsync();
                 await DbCommandExecution.ExecuteNonQueryAsync(conn, createSql, null, CancellationToken.None);
                 _stagingTableChecked = true;
 
@@ -250,7 +250,7 @@ namespace Customize_ORM.Impl
         {
             Stopwatch sw = Stopwatch.StartNew();
             await EnsureStagingTableExistsAsync();
-            var bulkSqlBuilder = new PostgreSqlBulkUpdateSqlBuilder<T>(_upadteMapping);
+            var bulkSqlBuilder = new PostgreSqlBulkUpdateSqlBuilder<T>(_updateMapping);
             var lazyRetry = new Lazy<RetryOperation<T>>(() => new RetryOperation<T>
             {
                 Entitys = entitys,
@@ -261,12 +261,12 @@ namespace Customize_ORM.Impl
                 RetryTime = CalcNextRetryTime(retryCount + 1)
             }, LazyThreadSafetyMode.ExecutionAndPublication);
             var batchId = Guid.NewGuid();
-            string[] allColumns = [_upadteMapping.Key, _upadteMapping.PartitionKey, .. columns];
+            string[] allColumns = [_updateMapping.Key, _updateMapping.PartitionKey, .. columns];
             // 写入 staging 表
-            await using (var stagingConn = await _postgreSql.GetConnectionAsync())
+            await using (var stagingConn = await _connectionFactory.OpenConnectionAsync())
             {
                 var copySql = bulkSqlBuilder.BuildCopySql(_stagingTableName, allColumns, includeBatchId: true);
-                await using var writer = await stagingConn.BeginBinaryImportAsync(copySql, token);
+                await using var writer = await BeginBinaryImportAsync(stagingConn, copySql, token);
                 var columnCount = allColumns.Length;
                 var data = new object[columnCount + 1];
                 data[0] = batchId;
@@ -290,12 +290,12 @@ namespace Customize_ORM.Impl
                 additionalWhereClause: expressionStr,
                 sourcePredicate: "staging.batch_id = @batchId");
             updateSql = AppendReturningIfRetry(updateSql, tableName, retryCount);
-            await using var connection = await _postgreSql.GetConnectionAsync();
+            await using var connection = await _connectionFactory.OpenConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync(token);
             try
             {
                 await ExecuteBatchUpdateAsync(connection, transaction, updateSql,
-                    cmd => cmd.Parameters.AddWithValue("batchId", batchId), entitys,
+                    cmd => cmd.Parameters.Add(PostgreSqlParameterFactory.Create("@batchId", batchId, typeof(Guid))), entitys,
                     columns, expressionStr, tableName, retryCount, nameof(StagingStrategyAsync),
                     sw, lazyRetry, token);
             }
@@ -345,7 +345,7 @@ namespace Customize_ORM.Impl
         {
             try
             {
-                await using var conn = await _postgreSql.GetConnectionAsync();
+                await using var conn = await _connectionFactory.OpenConnectionAsync();
                 var sql = $"DELETE FROM {_stagingTableName} WHERE batch_id = @batchId";
                 await DbCommandExecution.ExecuteNonQueryAsync(
                     conn,
@@ -365,8 +365,8 @@ namespace Customize_ORM.Impl
         {
             Stopwatch sw = Stopwatch.StartNew();
             string tmp = $"tmp_{Guid.NewGuid():N}";
-            var bulkSqlBuilder = new PostgreSqlBulkUpdateSqlBuilder<T>(_upadteMapping);
-            string[] allColumns = [_upadteMapping.Key, _upadteMapping.PartitionKey, .. columns];
+            var bulkSqlBuilder = new PostgreSqlBulkUpdateSqlBuilder<T>(_updateMapping);
+            string[] allColumns = [_updateMapping.Key, _updateMapping.PartitionKey, .. columns];
             var lazyRetry = new Lazy<RetryOperation<T>>(() => new RetryOperation<T>
             {
                 Entitys = entitys,
@@ -378,7 +378,7 @@ namespace Customize_ORM.Impl
             }, LazyThreadSafetyMode.ExecutionAndPublication);
             //创建临时表  
             string sql = bulkSqlBuilder.BuildCreateTemporaryTableSql(tmp, allColumns);
-            await using var connection = await _postgreSql.GetConnectionAsync();
+            await using var connection = await _connectionFactory.OpenConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync(token);
             try
             {
@@ -387,7 +387,7 @@ namespace Customize_ORM.Impl
                 if (-1 == rel)
                 {
                     var copySql = bulkSqlBuilder.BuildCopySql(tmp, allColumns);
-                    using (var writer = await connection.BeginBinaryImportAsync(copySql, token))
+                    using (var writer = await BeginBinaryImportAsync(connection, copySql, token))
                     {
 
                         var rowFactory = GetRowFactoryForColumns(allColumns);
@@ -462,11 +462,11 @@ namespace Customize_ORM.Impl
             string guidShort = Guid.NewGuid().ToString("N")[..4];
             string timestampShort = DateTime.Now.ToString("HHmmssfff");
             string tmp = $"cte_{guidShort}{timestampShort}";
-            var commandBuilder = new PostgreSqlCteUpdateCommandBuilder<T>(_upadteMapping);
+            var commandBuilder = new PostgreSqlCteUpdateCommandBuilder<T>(_updateMapping);
             var commandDefinition = commandBuilder.Build(entitys, columns, tableName, tmp, expressionStr);
             // 重试路径追加 RETURNING 主键，用于识别实际命中行，从而把已更新成功的数据从重试数据中过滤掉
             string sql = AppendReturningIfRetry(commandDefinition.Sql, tableName, retryCount);
-            await using var connection = await _postgreSql.GetConnectionAsync();
+            await using var connection = await _connectionFactory.OpenConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync(token);
             try
             {
@@ -602,8 +602,7 @@ namespace Customize_ORM.Impl
         /// </summary>
         /// <param name="op"></param>
         /// <returns></returns>
-        private static string GetGroupKey(BatchOperation<T> op) =>
-    $"{string.Join(",", op.UpdateColumns.OrderBy(c => c))}|{op.Expression ?? ""}|{op.TableName}";
+        private static string GetGroupKey(BatchOperation<T> op) => BatchRepositoryShared<T>.GetGroupKey(op);
         #endregion
 
         #region 内存重试 
@@ -673,8 +672,7 @@ namespace Customize_ORM.Impl
         /// </summary>
         private static DateTimeOffset CalcNextRetryTime(int retryCnt)
         {
-            var waitSeconds = Math.Pow(2, retryCnt);
-            return DateTimeOffset.Now.AddSeconds(waitSeconds);
+            return BatchRepositoryShared<T>.CalcNextRetryTime(retryCnt);
         }
         #endregion
 
@@ -847,7 +845,7 @@ namespace Customize_ORM.Impl
         private static string AppendReturningIfRetry(string sql, string tableName, int retryCount)
         {
             return retryCount > 0
-                ? $"{sql} RETURNING {tableName}.{_upadteMapping.Key}"
+                ? $"{sql} RETURNING {tableName}.{_updateMapping.Key}"
                 : sql;
         }
         /// <summary>
@@ -867,10 +865,10 @@ namespace Customize_ORM.Impl
         /// <param name="lazyRetry">整批重试数据（正常路径回滚时使用）</param>
         /// <param name="token">取消令牌</param>
         private async Task ExecuteBatchUpdateAsync(
-            NpgsqlConnection connection,
-            NpgsqlTransaction transaction,
+            DbConnection connection,
+            DbTransaction transaction,
             string sql,
-            Action<NpgsqlCommand> configureParameters,
+            Action<DbCommand> configureParameters,
             T[] entitys,
             string[] columns,
             string? expressionStr,
@@ -881,7 +879,7 @@ namespace Customize_ORM.Impl
             Lazy<RetryOperation<T>> lazyRetry,
             CancellationToken token)
         {
-            await using var command = new NpgsqlCommand(sql, connection, transaction);
+            await using var command = DbCommandExecution.CreateCommand(connection, sql, null, transaction);
             configureParameters(command);
             if (retryCount > 0)
             {
@@ -902,6 +900,24 @@ namespace Customize_ORM.Impl
             }
         }
         /// <summary>
+        /// 打开 Npgsql 二进制导入通道：COPY FORMAT BINARY 是 Npgsql 专属能力，无法用 ADO.NET 抽象表达，
+        /// 因此把驱动类型转换集中在此处，其余逻辑保持抽象。
+        /// </summary>
+        /// <param name="connection">已打开的连接，必须是 NpgsqlConnection</param>
+        /// <param name="copySql">COPY 语句</param>
+        /// <param name="token">取消令牌</param>
+        private static async Task<NpgsqlBinaryImporter> BeginBinaryImportAsync(DbConnection connection, string copySql, CancellationToken token)
+        {
+            if (connection is not NpgsqlConnection npgsqlConnection)
+            {
+                throw new NotSupportedException(
+                    $"COPY binary import requires an NpgsqlConnection, but got {connection.GetType().Name}.");
+            }
+
+            return await npgsqlConnection.BeginBinaryImportAsync(copySql, token);
+        }
+
+        /// <summary>
         /// 汇总批量 UPDATE 结果：全部命中提交；正常路径未全部命中回滚整批重试；重试路径提交命中行并仅重试未命中行
         /// </summary>
         /// <param name="transaction">当前事务</param>
@@ -918,7 +934,7 @@ namespace Customize_ORM.Impl
         /// <param name="lazyRetry">整批重试数据（正常路径回滚时使用）</param>
         /// <param name="token">取消令牌</param>
         private async Task CompleteUpdateAsync(
-            NpgsqlTransaction transaction,
+            DbTransaction transaction,
             int totalCount,
             int matchedCount,
             HashSet<object?>? matchedKeys,
@@ -970,23 +986,6 @@ namespace Customize_ORM.Impl
             _logger.LogWarning("Partial update! Entity:{type},Total Count:{totalCount},Success Count:{successCount},Skipped Count:{skippedCount} ,Function Name:{funName}", typeof(T).Name, totalCount, matchedCount, totalCount - matchedCount, strategyName);
         }
         /// <summary>
-        /// 安全回滚：命令失败后事务可能已中止或销毁，回滚异常不应掩盖原始错误
-        /// </summary>
-        /// <param name="transaction">待回滚事务</param>
-        /// <param name="token">取消令牌</param>
-        private async Task SafeRollbackAsync(NpgsqlTransaction transaction, CancellationToken token)
-        {
-            try
-            {
-                await transaction.RollbackAsync(token);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // 事务可能已中止/销毁，回滚失败不影响原始异常继续上报
-                _logger.LogDebug("Rollback failed: {message}", ex.Message);
-            }
-        }
-        /// <summary>
         /// 根据实际命中主键筛选出未命中的实体，主键值按写入转换规则归一化，保证与数据库返回值可比较
         /// </summary>
         /// <param name="entitys">整批实体</param>
@@ -994,9 +993,9 @@ namespace Customize_ORM.Impl
         /// <returns>未命中的实体列表</returns>
         private static List<T> ComputeUnmatchedEntities(T[] entitys, HashSet<object?> matchedKeys)
         {
-            var keyColumn = _upadteMapping.Key;
-            var getter = _upadteMapping.ValueGetters[keyColumn];
-            var isJsonb = _upadteMapping.JsonbColumns.Contains(keyColumn);
+            var keyColumn = _updateMapping.Key;
+            var getter = _updateMapping.ValueGetters[keyColumn];
+            var isJsonb = _updateMapping.JsonbColumns.Contains(keyColumn);
             return entitys.Where(entity => !matchedKeys.Contains(ObjectMapping<T>.ConvertValueForWrite(getter(entity), isJsonb))).ToList();
         }
         /// <summary>
@@ -1005,7 +1004,7 @@ namespace Customize_ORM.Impl
         /// <param name="reader">RETURNING 结果读取器，第一列为返回的主键</param>
         /// <param name="token">取消令牌</param>
         /// <returns>命中的主键集合</returns>
-        private static async Task<HashSet<object?>> ReadMatchedKeysAsync(NpgsqlDataReader reader, CancellationToken token)
+        private static async Task<HashSet<object?>> ReadMatchedKeysAsync(DbDataReader reader, CancellationToken token)
         {
             var matchedKeys = new HashSet<object?>();
             while (await reader.ReadAsync(token))
@@ -1042,21 +1041,21 @@ namespace Customize_ORM.Impl
 
             return _rowFactoryCache.GetOrAdd(key, _ =>
             {
-                // 使用 _upadteMapping（已有的、经过验证的映射）
+                // 使用 _updateMapping（已有的、经过验证的映射）
                 var getters = new List<Func<T, object?>>(columns.Length);
                 var isJsonbColumns = new List<bool>(columns.Length);
                 foreach (var col in columns)
                 {
                     // ValueGetters 字典已配置为忽略大小写
-                    if (_upadteMapping.ValueGetters.TryGetValue(col, out var getter))
+                    if (_updateMapping.ValueGetters.TryGetValue(col, out var getter))
                     {
                         getters.Add(getter);
-                        isJsonbColumns.Add(_upadteMapping.JsonbColumns.Contains(col));
+                        isJsonbColumns.Add(_updateMapping.JsonbColumns.Contains(col));
                     }
                     else
                     {
                         throw new InvalidOperationException(
-                            $"列 '{col}' 在类型 {typeof(T).Name} 的映射中不存在。可用列：{string.Join(", ", _upadteMapping.ValueGetters.Keys)}");
+                            $"列 '{col}' 在类型 {typeof(T).Name} 的映射中不存在。可用列：{string.Join(", ", _updateMapping.ValueGetters.Keys)}");
                     }
                 }
 

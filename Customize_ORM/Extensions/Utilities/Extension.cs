@@ -1,5 +1,6 @@
-﻿using Customize_ORM.Impl;
-using Customize_ORM.Interfaces.ConnectionFactory;
+﻿using Customize_ORM.Enums;
+using Customize_ORM.Impl;
+using Customize_ORM.Interfaces;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -8,43 +9,72 @@ namespace Customize_ORM.Extensions
 {
     public static class Extension
     {
+        /// <summary>
+        /// PostgreSQL 连接串配置键。
+        /// </summary>
+        public const string PostgreSqlConfigurationKey = "Database";
+
+        /// <summary>
+        /// ClickHouse 连接串配置键。
+        /// </summary>
+        public const string ClickHouseConfigurationKey = "ClickHouse";
+
+        /// <summary>
+        /// 虚谷连接串配置键。
+        /// </summary>
+        public const string XuguConfigurationKey = "Xugu";
+
+        /// <summary>
+        /// 按数据库类型注册统一的连接工厂。
+        /// 已配置连接串的库注册真实工厂；未配置的库注册占位工厂，仅在真正取连接时抛错，
+        /// 避免未使用该库的部署（如只接 PG 的服务）因缺少其他库配置而启动失败。
+        /// </summary>
+        /// <param name="services">服务集合</param>
+        /// <param name="configuration">应用配置</param>
         public static IServiceCollection AddRepositories(this IServiceCollection services, IConfiguration configuration)
         {
             //pgsql开启DateTimeOffset支持
             AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
-            //注入pgsql
-            services.AddSingleton<IPgConnectionFactory>(sp =>
-            { 
-                var connectionString = configuration.GetSection("Database").Value;
-                if (string.IsNullOrEmpty(connectionString))
-                {
-                    throw new InvalidOperationException($"Pgsql Connection string 'Database' not found in configuration.");
-                }
 
-                var logger = sp.GetRequiredService<ILogger<NpgsqlConnectionFactory>>();
-                return new NpgsqlConnectionFactory(connectionString);
-            });
-            //注入clickhouse
-            services.AddSingleton<IChConnectionFactory>(sp =>
+            // 注入 pgsql
+            var postgreSqlConnectionString = configuration.GetSection(PostgreSqlConfigurationKey).Value;
+            if (string.IsNullOrWhiteSpace(postgreSqlConnectionString))
             {
-                var connectionString = configuration.GetSection("ClickHouse").Value;
-                if (string.IsNullOrEmpty(connectionString))
-                {
-                    throw new InvalidOperationException($"Clickhouse Connection string 'ClickHouse' not found in configuration.");
-                }
-                var logger = sp.GetRequiredService<ILogger<ClickhouseConnectionFactory>>();
-                return new ClickhouseConnectionFactory(connectionString, logger);
-            });
-            //注入虚谷（配置在单例委托内才求值，未配置虚谷的存量应用初始化不受影响）
-            services.AddSingleton<IXuguConnectionFactory>(sp =>
+                services.AddKeyedSingleton<IDbConnectionFactory>(DBType.PostgreSQL,
+                    (_, _) => new UnconfiguredConnectionFactory(DBType.PostgreSQL, PostgreSqlConfigurationKey));
+            }
+            else
             {
-                var connectionString = configuration.GetSection("Xugu").Value;
-                if (string.IsNullOrEmpty(connectionString))
-                {
-                    throw new InvalidOperationException($"Xugu Connection string 'Xugu' not found in configuration.");
-                }
-                return new XuguConnectionFactory(connectionString);
-            });
+                services.AddKeyedSingleton<IDbConnectionFactory>(DBType.PostgreSQL,
+                    (_, _) => new NpgsqlConnectionFactory(postgreSqlConnectionString));
+            }
+
+            // 注入 clickhouse
+            var clickHouseConnectionString = configuration.GetSection(ClickHouseConfigurationKey).Value;
+            if (string.IsNullOrWhiteSpace(clickHouseConnectionString))
+            {
+                services.AddKeyedSingleton<IDbConnectionFactory>(DBType.ClickHouse,
+                    (_, _) => new UnconfiguredConnectionFactory(DBType.ClickHouse, ClickHouseConfigurationKey));
+            }
+            else
+            {
+               services.AddKeyedSingleton<IDbConnectionFactory>(DBType.ClickHouse,
+                    (_, _) => new ClickhouseConnectionFactory(clickHouseConnectionString));
+            }
+
+            // 注入虚谷
+            var xuguConnectionString = configuration.GetSection(XuguConfigurationKey).Value;
+            if (string.IsNullOrWhiteSpace(xuguConnectionString))
+            {
+                services.AddKeyedSingleton<IDbConnectionFactory>(DBType.Xugu,
+                    (_, _) => new UnconfiguredConnectionFactory(DBType.Xugu, XuguConfigurationKey));
+            }
+            else
+            {
+                services.AddKeyedSingleton<IDbConnectionFactory>(DBType.Xugu,
+                    (_, _) => new XuguConnectionFactory(xuguConnectionString));
+            }
+
             return services;
         }
         /// <summary>

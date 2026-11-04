@@ -1,3 +1,4 @@
+using Customize_ORM.Interfaces.Sql;
 using System.Collections;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -10,7 +11,7 @@ namespace Customize_ORM.Extensions.Sql
     public sealed class SqlExpressionVisitor<T>
     {
         private readonly EntityMapping<T> _mapping;
-        private readonly SqlDialect _dialect;
+        private readonly IQueryDialect _dialect;
         private readonly SqlParameterContext _parameterContext;
         private readonly string? _tableAlias;
 
@@ -19,7 +20,7 @@ namespace Customize_ORM.Extensions.Sql
         /// </summary>
         public SqlExpressionVisitor(
             EntityMapping<T> mapping,
-            SqlDialect dialect,
+            IQueryDialect dialect,
             SqlParameterContext parameterContext,
             string? tableAlias = null)
         {

@@ -1,3 +1,4 @@
+using Customize_ORM.Interfaces.Sql;
 using System.Text;
 
 namespace Customize_ORM.Extensions.Sql
@@ -6,7 +7,7 @@ namespace Customize_ORM.Extensions.Sql
     /// 虚谷查询 SQL 构建器：统一生成 SELECT/COUNT/UPDATE 与多值 VALUES 批量 INSERT 语句。
     /// 虚谷无 COPY，批量写入依赖 "INSERT ... VALUES(...)(...)..." 多元组语法。
     /// </summary>
-    internal sealed class XuguQuerySqlBuilder<T>
+    internal sealed class XuguQuerySqlBuilder<T> : IQuerySqlBuilder<T>, IBulkInsertSqlBuilder<T>
     {
         /// <summary>
         /// 单条多值 INSERT 语句允许承载的最大行数，避免语句过长和驱动解析失败。
@@ -85,6 +86,13 @@ namespace Customize_ORM.Extensions.Sql
             var placeholders = string.Join(", ", columns.Select(column => $":{column}"));
             return $"INSERT INTO {TableName} ({columnList}) VALUES ({placeholders})";
         }
+
+        /// <summary>
+        /// 虚谷无 COPY 二进制导入能力，调用即抛异常，避免静默返回无效 SQL。
+        /// </summary>
+        /// <param name="columns">导入列</param>
+        public string CopyBinaryImport(IEnumerable<string> columns)
+            => throw new NotSupportedException("虚谷不支持 COPY 二进制导入，请使用多值 INSERT。");
 
         /// <summary>
         /// 生成多值 INSERT 语句；占位符按行索引命名（如 :r0_id），避免不同行同名参数冲突，参数由仓储逐行创建。

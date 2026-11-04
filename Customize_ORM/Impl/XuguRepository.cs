@@ -1,7 +1,7 @@
 using Customize_ORM.Extensions;
 using Customize_ORM.Extensions.Sql;
 using Customize_ORM.Interfaces;
-using Customize_ORM.Interfaces.ConnectionFactory;
+using Customize_ORM.Interfaces.Sql;
 using Microsoft.Extensions.Logging;
 using System.Data;
 using System.Data.Common;
@@ -12,9 +12,10 @@ using XuguClient;
 namespace Customize_ORM.Impl
 {
     /// <summary>
-    /// 虚谷数据库仓储基础实现：表达式查询、参数化写入与 ADO.NET 抽象执行。
+    /// 虚谷数据库仓储基础实现：实现统一的 <see cref="IRepository{T}"/> 契约，
+    /// 表达式查询、参数化写入与 ADO.NET 抽象执行；虚谷专属的 ":name" 占位符与参数工厂差异由方言层承担。
     /// </summary>
-    public class XuguRepository<T> : IXuguRepository<T> where T : class
+    public class XuguRepository<T> : IRepository<T> where T : class
     {
         private sealed class ReaderMappingException(string entityName, Exception innerException)
             : Exception($"Failed to map {entityName} from database reader.", innerException);
@@ -23,7 +24,8 @@ namespace Customize_ORM.Impl
         protected static readonly EntityMapping<T> _updateMapping = ObjectMapping<T>.MappingForUpdate;
         protected static readonly Func<DbDataReader, T> _entityReader = EntityDataReaderMapper<T>.Create(_mapping);
         protected readonly string _tableName;
-        protected readonly IXuguConnectionFactory _xugu;
+        protected readonly IDbConnectionFactory _connectionFactory;
+        protected readonly IQueryDialect _dialect;
         protected readonly ILogger _logger;
         protected readonly bool _hasPartitionKey;
         protected readonly Func<T, object?>? _partitionKeyGetter;
@@ -31,10 +33,12 @@ namespace Customize_ORM.Impl
         /// <summary>
         /// 表达式查询生成的占位符统一走虚谷方言（:name），主键列表删除占位符从 0 起编号。
         /// </summary>
-        public XuguRepository(IXuguConnectionFactory xugu, ILogger<XuguRepository<T>> logger)
+        public XuguRepository(IDbConnectionFactory connectionFactory, ILogger<XuguRepository<T>> logger)
         {
+            ArgumentNullException.ThrowIfNull(connectionFactory);
+            _connectionFactory = connectionFactory;
+            _dialect = SqlDialect.For(Enums.DBType.Xugu);
             _tableName = _mapping.TableName;
-            _xugu = xugu;
             _logger = logger;
             _hasPartitionKey = !string.IsNullOrWhiteSpace(_mapping.PartitionKey);
             if (_hasPartitionKey && _mapping.ValueGetters.TryGetValue(_mapping.PartitionKey, out var getter))
@@ -47,15 +51,15 @@ namespace Customize_ORM.Impl
         /// 返回当前实体对应的查询构建器（可指定分区后缀表名）。
         /// </summary>
         /// <param name="tableName">分区后缀表名；空则使用映射表名。</param>
-        private static XuguQuerySqlBuilder<T> CreateQueryBuilder(string? tableName = null)
-            => new(_mapping, tableName);
+        private static IQuerySqlBuilder<T> CreateQueryBuilder(string? tableName = null)
+            => new XuguQuerySqlBuilder<T>(_mapping, tableName);
 
         /// <summary>
         /// 获取虚谷数据库连接。
         /// </summary>
         public async Task<DbConnection> GetConnectionAsync(CancellationToken token = default)
         {
-            var connection = await _xugu.GetConnectionAsync(token);
+            var connection = await _connectionFactory.OpenConnectionAsync(token);
             ArgumentNullException.ThrowIfNull(connection, nameof(connection));
             return connection;
         }
@@ -91,7 +95,7 @@ namespace Customize_ORM.Impl
         {
             try
             {
-                await using var connection = await _xugu.GetConnectionAsync(token);
+                await using var connection = await _connectionFactory.OpenConnectionAsync(token);
                 var queryBuilder = CreateQueryBuilder();
                 var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.Xugu);
                 if (expression != null)
@@ -118,7 +122,7 @@ namespace Customize_ORM.Impl
                 if (string.IsNullOrWhiteSpace(sql))
                     throw new ArgumentException($"{nameof(QueryFirstOrDefaultAsync)} {typeof(T).Name} SQL query cannot be empty or whitespace.", nameof(sql));
 
-                await using var connection = await _xugu.GetConnectionAsync(token);
+                await using var connection = await _connectionFactory.OpenConnectionAsync(token);
                 await using var command = DbCommandExecution.CreateCommand(connection, sql, parameters);
                 await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, token);
                 if (!await reader.ReadAsync(token))
@@ -139,7 +143,7 @@ namespace Customize_ORM.Impl
         {
             try
             {
-                await using var connection = await _xugu.GetConnectionAsync(token);
+                await using var connection = await _connectionFactory.OpenConnectionAsync(token);
                 var sqlExpression = new SqlExpression<T>(_mapping, Enums.DBType.Xugu).Select().First();
                 if (expression != null)
                 {
@@ -173,7 +177,7 @@ namespace Customize_ORM.Impl
                 if (string.IsNullOrWhiteSpace(sql))
                     throw new ArgumentException($"{nameof(QueryAsync)} {typeof(T).Name} SQL query cannot be empty or whitespace.", nameof(sql));
 
-                var connection = await _xugu.GetConnectionAsync(token);
+                var connection = await _connectionFactory.OpenConnectionAsync(token);
                 return await DbCommandExecution.ExecuteOwnedReaderAsync(connection, sql, parameters, token);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -187,7 +191,7 @@ namespace Customize_ORM.Impl
         {
             try
             {
-                await using var connection = await _xugu.GetConnectionAsync(token);
+                await using var connection = await _connectionFactory.OpenConnectionAsync(token);
                 var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.Xugu).Select();
                 if (expression != null)
                 {
@@ -223,7 +227,7 @@ namespace Customize_ORM.Impl
                 if (string.IsNullOrWhiteSpace(sql))
                     throw new ArgumentException($"{nameof(QueryAsync)} {typeof(T).Name} SQL query cannot be empty or whitespace.", nameof(sql));
 
-                await using var connection = await _xugu.GetConnectionAsync(token);
+                await using var connection = await _connectionFactory.OpenConnectionAsync(token);
                 await using var command = DbCommandExecution.CreateCommand(connection, sql, parameters);
                 await using var reader = await command.ExecuteReaderAsync(token);
                 var results = new List<TValue>();
@@ -248,7 +252,7 @@ namespace Customize_ORM.Impl
                 if (string.IsNullOrWhiteSpace(sql))
                     throw new ArgumentException($"{nameof(ExecuteNonQueryAsync)} {typeof(T).Name} SQL query cannot be empty or whitespace.", nameof(sql));
 
-                await using var connection = await _xugu.GetConnectionAsync(token);
+                await using var connection = await _connectionFactory.OpenConnectionAsync(token);
                 return await DbCommandExecution.ExecuteNonQueryAsync(connection, sql, parameters, token);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -260,7 +264,7 @@ namespace Customize_ORM.Impl
 
         public async ValueTask<List<T>> QueryAndDeleteAsync(string sql, CancellationToken token, string tableName, params DbParameter[] parameters)
         {
-            await using var connection = await _xugu.GetConnectionAsync(token);
+            await using var connection = await _connectionFactory.OpenConnectionAsync(token);
             await using var transaction = await connection.BeginTransactionAsync(token);
             try
             {
@@ -280,8 +284,16 @@ namespace Customize_ORM.Impl
                     return data;
                 }
 
-                // 虚谷不支持 pg 的 id = ANY(数组)，主键列表以 :id0..:idN 命名参数展开为 IN
-                var deleteSql = BuildIdsInClause(tableName, data, out var deleteParameters);
+                // 主键列表删除语句的语法差异（虚谷不支持数组参数，展开为 IN）收敛到方言层
+                var keyColumn = _mapping.Key;
+                var keyGetter = _mapping.ValueGetters[keyColumn];
+                var keyValues = data.Select(item => keyGetter(item)).ToList();
+                var deleteSql = _dialect.BuildDeleteByKeysSql(
+                    tableName,
+                    keyColumn,
+                    keyValues,
+                    GetPropertyType(keyColumn),
+                    out var deleteParameters);
                 await using var deleteCommand = DbCommandExecution.CreateCommand(connection, deleteSql, deleteParameters, transaction);
                 await deleteCommand.ExecuteNonQueryAsync(token);
                 await transaction.CommitAsync(token);
@@ -305,7 +317,7 @@ namespace Customize_ORM.Impl
             {
                 string tableName = GetPartition(entity);
                 var queryBuilder = CreateQueryBuilder(tableName);
-                using var connection = await _xugu.GetConnectionAsync();
+                using var connection = await _connectionFactory.OpenConnectionAsync();
                 var sqlExpr = new SqlExpression<T>(_mapping, Enums.DBType.Xugu).WithTableAlias(tableName);
                 if (expression != null)
                 {
@@ -343,7 +355,7 @@ namespace Customize_ORM.Impl
             {
                 string tableName = GetPartition(entity);
                 var queryBuilder = CreateQueryBuilder(tableName);
-                using var connection = await _xugu.GetConnectionAsync();
+                using var connection = await _connectionFactory.OpenConnectionAsync();
                 var valueGetters = _updateMapping.ValueGetters;
                 var updateColumns = columns.ToArray();
                 sql = queryBuilder.ApplyWhere(queryBuilder.Update(updateColumns), queryBuilder.WhereByKey());
@@ -379,9 +391,9 @@ namespace Customize_ORM.Impl
                     tableName = _tableName + "_" + partition;
                 }
 
-                var queryBuilder = CreateQueryBuilder(tableName);
-                sql = queryBuilder.BuildSingleInsertSql(_mapping.AllColumns);
-                using var connection = await _xugu.GetConnectionAsync();
+                var insertBuilder = new XuguQuerySqlBuilder<T>(_mapping, tableName);
+                sql = insertBuilder.BuildSingleInsertSql(_mapping.AllColumns);
+                using var connection = await _connectionFactory.OpenConnectionAsync();
                 var parameters = new List<DbParameter>(_mapping.AllColumns.Length);
                 foreach (var col in _mapping.AllColumns)
                 {
@@ -432,31 +444,6 @@ namespace Customize_ORM.Impl
         #endregion
 
         #region 辅助
-        /// <summary>
-        /// 生成主键 IN 删除语句并按实体集合的真实主键值绑定命名参数（:id0..:idN）。
-        /// </summary>
-        /// <param name="tableName">删除语句的目标表名。</param>
-        /// <param name="entities">已查询出的待删除实体。</param>
-        /// <param name="parameters">输出的绑定参数集合。</param>
-        private string BuildIdsInClause(string tableName, List<T> entities, out List<DbParameter> parameters)
-        {
-            var keyColumn = _mapping.Key;
-            var getter = _mapping.ValueGetters[keyColumn];
-            var keyType = GetPropertyType(keyColumn);
-            parameters = new List<DbParameter>(entities.Count);
-            var index = 0;
-            var placeholders = new List<string>(entities.Count);
-            foreach (var entity in entities)
-            {
-                var parameterName = $":id{index}";
-                parameters.Add(XuguParameterFactory.Create(parameterName, getter(entity), keyType));
-                placeholders.Add(parameterName);
-                index++;
-            }
-
-            return $"DELETE FROM {tableName} WHERE {keyColumn} IN ({string.Join(", ", placeholders)})";
-        }
-
         /// <summary>
         /// 安全回滚：事务可能已中止或销毁，回滚失败不应掩盖原始错误。
         /// </summary>

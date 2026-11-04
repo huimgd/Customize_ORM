@@ -6,6 +6,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Test.Entities;
+using Test.Regressions;
 
 namespace Test
 {
@@ -55,6 +56,13 @@ namespace Test
                 return;
             }
 
+            // 统一抽象契约回归：校验跨库接口一致性与能力缺口处理，不连接真实数据库。
+            if (args.Contains("--run-contract-regression", StringComparer.OrdinalIgnoreCase))
+            {
+                RepositoryContractRegression.Run();
+                return;
+            }
+
             if (args.Contains("--regression-only", StringComparer.OrdinalIgnoreCase))
             {
                 return;
@@ -84,11 +92,12 @@ namespace Test
 
             // 调用您在 Extension.cs 中编写的扩展方法，注入数据库仓储/连接工厂
             services.AddRepositories(configuration);
-            //注入postgresql数据库服务
-            services.AddSingleton(typeof(IBatchPostgresRepository<>), typeof(BatchPostgresRepository<>));
-            services.AddSingleton(typeof(IPostgresRepository<>), typeof(PostgresRepository<>));
-            //注入clickhouse数据库服务
-            services.AddSingleton(typeof(IClickhouseRepository<>), typeof(ClickhouseRepository<>));
+            // 注入 PostgreSQL 数据库服务（批量实现同时具备批量更新与批量插入能力）
+            services.AddSingleton(typeof(IBatchUpdateRepository<>), typeof(BatchPostgresRepository<>));
+            services.AddSingleton(typeof(IBulkInsertRepository<>), typeof(BatchPostgresRepository<>));
+            services.AddSingleton(typeof(IRepository<>), typeof(PostgresRepository<>));
+            // 注入 ClickHouse 数据库服务
+            services.AddSingleton(typeof(IQueryableRepository<>), typeof(ClickhouseRepository<>));
             // 构建服务提供者 (ServiceProvider)
             var serviceProvider = services.BuildServiceProvider();
 
@@ -106,11 +115,11 @@ namespace Test
 
             Console.WriteLine($"临时目录配置为: {AppSettings.Current.FileSettings.TempDirectoryPath}");
            // 通过局部的 serviceProvider 获取服务进行测试
-            var repository = serviceProvider.GetRequiredService<IPostgresRepository<AdminEntity>>();
+            var repository = serviceProvider.GetRequiredService<IRepository<AdminEntity>>();
            long count = await repository.GetCountAsync(e => e.IsDeleted == false, CancellationToken.None);
             Console.WriteLine($"未删除的管理员数量: {count}");
-            var blacklogs=serviceProvider.GetRequiredService<IClickhouseRepository<BlackApiLogEntity>>();
-           var loginfos=blacklogs.QueryStreamAsync(e => e.IsBlackMobile == true);
+            var blacklogs=serviceProvider.GetRequiredService<ClickhouseRepository<BlackApiLogEntity>>();
+           var loginfos=blacklogs.QueryStreamAsync(e => e.IsBlackMobile == true, "", CancellationToken.None);
             await foreach (var log in loginfos)
             {
                 Console.WriteLine($"黑名单日志: {log.Id}, 手机号: {log.Mobile}, 持续时间: {log.ExecutionDuration}");

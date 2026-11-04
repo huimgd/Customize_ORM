@@ -1,5 +1,6 @@
 using Customize_ORM.Enums;
 using Customize_ORM.Extensions.Sql;
+using Customize_ORM.Interfaces.Sql;
 using System.Data.Common;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -15,7 +16,7 @@ namespace Customize_ORM.Extensions
     {
         protected readonly EntityMapping<T> _mapping;
 
-        private readonly SqlDialect _dialect;
+        private readonly IQueryDialect _dialect;
         private readonly SqlParameterContext _parameterContext;
         private readonly List<(string Sql, string? Operator)> _whereClauses = [];
         private readonly StringBuilder _orderByBuilder = new();

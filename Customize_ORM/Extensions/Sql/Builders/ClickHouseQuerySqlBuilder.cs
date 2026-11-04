@@ -1,11 +1,12 @@
 using Customize_ORM.Extensions;
+using Customize_ORM.Interfaces.Sql;
 
 namespace Customize_ORM.Extensions.Sql
 {
     /// <summary>
     /// ClickHouse 查询 SQL 构建器，统一处理 FINAL、默认排序、分页和基础 SELECT/COUNT 片段。
     /// </summary>
-    internal sealed class ClickHouseQuerySqlBuilder<T>
+    internal sealed class ClickHouseQuerySqlBuilder<T> : IQuerySqlBuilder<T>
     {
         private readonly string _defaultOrderColumn;
 
@@ -31,8 +32,18 @@ namespace Customize_ORM.Extensions.Sql
         public string Count(bool final = false)
             => $"SELECT COUNT(*) FROM {TableName}{(final ? " FINAL" : string.Empty)}";
 
+        /// <summary>
+        /// 接口约定的无参 COUNT。
+        /// </summary>
+        string IQuerySqlBuilder<T>.Count() => Count();
+
         public string SelectAll(bool final = false)
             => Select(AllColumns, final);
+
+        /// <summary>
+        /// 接口约定的全列 SELECT。
+        /// </summary>
+        string IQuerySqlBuilder<T>.SelectAll() => SelectAll();
 
         public string Select(string columns, bool final = false)
         {
@@ -48,6 +59,19 @@ namespace Customize_ORM.Extensions.Sql
             => string.IsNullOrWhiteSpace(whereClause)
                 ? sql
                 : $"{sql} WHERE {whereClause}";
+
+        /// <summary>
+        /// ClickHouse 不支持单行 UPDATE，接口方法仅用于满足契约。
+        /// </summary>
+        /// <param name="columns">需要更新的列</param>
+        public string Update(IEnumerable<string> columns)
+            => throw new NotSupportedException($"ClickHouse 不支持单行 UPDATE 语句：{typeof(T).Name}。");
+
+        /// <summary>
+        /// ClickHouse 不支持按主键单行定位更新，接口方法仅用于满足契约。
+        /// </summary>
+        public string WhereByKey()
+            => throw new NotSupportedException($"ClickHouse 不支持按主键单行定位更新：{typeof(T).Name}。");
 
         public string ResolveOrderBy(string? orderByClause = null)
         {

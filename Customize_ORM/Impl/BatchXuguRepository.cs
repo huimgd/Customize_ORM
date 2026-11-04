@@ -2,7 +2,6 @@ using Customize_ORM.Enums;
 using Customize_ORM.Extensions;
 using Customize_ORM.Extensions.Sql;
 using Customize_ORM.Interfaces;
-using Customize_ORM.Interfaces.ConnectionFactory;
 using Customize_ORM.Models;
 using MessagePack;
 using Microsoft.Extensions.Logging;
@@ -19,7 +18,7 @@ namespace Customize_ORM.Impl
     /// 写入路径以分批多值 INSERT 承载，批量更新以 staging/TEMPORARY 表 UPDATE FROM 承载（虚谷无 COPY/CTE DML）。
     /// </summary>
     /// <typeparam name="T"></typeparam>
-    public class BatchXuguRepository<T> : XuguRepository<T>, IBatchXuguRepository<T> where T : class
+    public class BatchXuguRepository<T> : XuguRepository<T>, IBatchUpdateRepository<T>, IBulkInsertRepository<T> where T : class
     {
         private const int UpdateBatchSize = 10000;
         private const int MaxRetryCount = 8;
@@ -36,7 +35,7 @@ namespace Customize_ORM.Impl
         private readonly TimeSpan _fileRetryInterval = TimeSpan.FromMinutes(10);
         private static readonly ConcurrentDictionary<string, Func<T, object[]>> _rowFactoryCache = new();
         private static readonly SemaphoreSlim _stagingTableLock = new(1, 1);
-        public BatchXuguRepository(IXuguConnectionFactory xugu, ILogger<XuguRepository<T>> logger) : base(xugu, logger)
+        public BatchXuguRepository(IDbConnectionFactory xugu, ILogger<XuguRepository<T>> logger) : base(xugu, logger)
         {
             _stagingTableName = $"staging_{_tableName}";
             _backupFilePath = Path.Combine(Directory.GetCurrentDirectory(), AppSettings.Current.FileSettings.TempDirectoryPath, "XuguRepository", typeof(T).Name);
@@ -142,7 +141,7 @@ namespace Customize_ORM.Impl
                 }
                 var queryBuilder = new XuguQuerySqlBuilder<T>(_mapping, tableName);
                 var columns = _updateMapping.AllColumns;
-                using var connection = await _xugu.GetConnectionAsync(CancellationToken.None);
+                using var connection = await _connectionFactory.OpenConnectionAsync(CancellationToken.None);
                 ArgumentNullException.ThrowIfNull(connection, nameof(connection));
                 await using var transaction = await connection.BeginTransactionAsync(CancellationToken.None);
                 var rowFactory = GetRowFactoryForColumns(columns);
@@ -222,7 +221,7 @@ namespace Customize_ORM.Impl
                 if (_stagingTableChecked) return;
                 var bulkSqlBuilder = new XuguBulkUpdateSqlBuilder<T>(_updateMapping);
                 var createSql = bulkSqlBuilder.BuildCreateStagingTableSql(_stagingTableName);
-                await using var conn = await _xugu.GetConnectionAsync(CancellationToken.None);
+                await using var conn = await _connectionFactory.OpenConnectionAsync(CancellationToken.None);
                 await DbCommandExecution.ExecuteNonQueryAsync(conn, createSql, null, CancellationToken.None);
                 _stagingTableChecked = true;
             }
@@ -258,7 +257,7 @@ namespace Customize_ORM.Impl
             stagingCandidates.AddRange(columns);
             string[] allColumns = [.. stagingCandidates.Where(c => !string.IsNullOrWhiteSpace(c)).Distinct(StringComparer.OrdinalIgnoreCase)];
             // 写入 staging 表（事务外，AUTO_COMMIT=on 下分批多值 INSERT 各自生效；批次数据以 batch_id 隔离）
-            await using (var stagingConn = await _xugu.GetConnectionAsync(token))
+            await using (var stagingConn = await _connectionFactory.OpenConnectionAsync(token))
             {
                 var rowFactory = GetRowFactoryForColumns(allColumns);
                 var effectiveColumns = EffectiveColumns(allColumns, includeBatchId: true);
@@ -279,7 +278,7 @@ namespace Customize_ORM.Impl
                 additionalWhereClause: expressionStr,
                 sourcePredicate: "staging.batch_id = :batchId");
             updateSql = AppendReturningIfRetry(updateSql, tableName, retryCount);
-            await using var connection = await _xugu.GetConnectionAsync(token);
+            await using var connection = await _connectionFactory.OpenConnectionAsync(token);
             await using var transaction = await connection.BeginTransactionAsync(token);
             try
             {
@@ -320,7 +319,7 @@ namespace Customize_ORM.Impl
         {
             try
             {
-                await using var conn = await _xugu.GetConnectionAsync();
+                await using var conn = await _connectionFactory.OpenConnectionAsync();
                 var sql = $"DELETE FROM {_stagingTableName} WHERE batch_id = :batchId";
                 await DbCommandExecution.ExecuteNonQueryAsync(
                     conn,
@@ -356,7 +355,7 @@ namespace Customize_ORM.Impl
                 RetryCount = retryCount + 1,
                 RetryTime = CalcNextRetryTime(retryCount + 1)
             }, LazyThreadSafetyMode.ExecutionAndPublication);
-            await using var connection = await _xugu.GetConnectionAsync(token);
+            await using var connection = await _connectionFactory.OpenConnectionAsync(token);
             await using var transaction = await connection.BeginTransactionAsync(token);
             try
             {
@@ -486,8 +485,7 @@ namespace Customize_ORM.Impl
         /// </summary>
         /// <param name="op">批量操作</param>
         /// <returns></returns>
-        private static string GetGroupKey(BatchOperation<T> op) =>
-    $"{string.Join(",", op.UpdateColumns.OrderBy(c => c))}|{op.Expression ?? ""}|{op.TableName}";
+        private static string GetGroupKey(BatchOperation<T> op) => BatchRepositoryShared<T>.GetGroupKey(op);
         #endregion
 
         #region 内存重试 
@@ -556,8 +554,7 @@ namespace Customize_ORM.Impl
         /// </summary>
         private static DateTimeOffset CalcNextRetryTime(int retryCnt)
         {
-            var waitSeconds = Math.Pow(2, retryCnt);
-            return DateTimeOffset.Now.AddSeconds(waitSeconds);
+            return BatchRepositoryShared<T>.CalcNextRetryTime(retryCnt);
         }
         #endregion
 

@@ -1,11 +1,12 @@
 using Customize_ORM.Extensions;
+using Customize_ORM.Interfaces.Sql;
 
 namespace Customize_ORM.Extensions.Sql
 {
     /// <summary>
     /// 虚谷批量更新 SQL 构建器，统一生成 staging 表、临时表和 UPDATE FROM 语句。
     /// </summary>
-    internal sealed class XuguBulkUpdateSqlBuilder<T>
+    internal sealed class XuguBulkUpdateSqlBuilder<T> : IBulkUpdateSqlBuilder<T>
     {
         /// <summary>
         /// staging 表批次号列宽；批次号为 Guid 字符串（36 字符），取 64 保留余量。

@@ -1,17 +1,24 @@
 using Customize_ORM.Enums;
+using Customize_ORM.Interfaces.Sql;
 using System.Data.Common;
 
 namespace Customize_ORM.Extensions.Sql
 {
     /// <summary>
     /// 为表达式构建定义特定于数据库的SQL参数行为。
+    /// 实现统一的 <see cref="IQueryDialect"/> 契约，各数据库各自实现抽象成员。
     /// </summary>
-    public abstract class SqlDialect
+    public abstract class SqlDialect : IQueryDialect
     {
-        private static readonly SqlDialect PostgreSql = new PostgreSqlDialect();
-        private static readonly SqlDialect ClickHouse = new ClickHouseDialect();
-        private static readonly SqlDialect MySql = new MySqlDialect();
-        private static readonly SqlDialect Xugu = new XuguDialect();
+        private static readonly IQueryDialect PostgreSql = new PostgreSqlDialect();
+        private static readonly IQueryDialect ClickHouse = new ClickHouseDialect();
+        private static readonly IQueryDialect MySql = new MySqlDialect();
+        private static readonly IQueryDialect Xugu = new XuguDialect();
+
+        /// <summary>
+        /// 当前方言对应的数据库类型。
+        /// </summary>
+        public abstract DBType DbType { get; }
 
         /// <summary>
         /// 获取当前方言使用的参数前缀。
@@ -81,7 +88,6 @@ namespace Customize_ORM.Extensions.Sql
             ArgumentException.ThrowIfNullOrWhiteSpace(sqlExpression);
             return $"UPPER({sqlExpression})";
         }
-
         /// <summary>
         /// 将标量 SQL 片段转换为字符串表达式。
         /// </summary>
@@ -155,9 +161,14 @@ namespace Customize_ORM.Extensions.Sql
         /// <summary>
         /// 创建参数实例，并校验返回名称与请求占位符一致。
         /// </summary>
-        public DbParameter CreateParameter(string name, object? value)
+        /// <param name="name">参数名（含占位符前缀）</param>
+        /// <param name="value">参数值</param>
+        /// <param name="propertyType">实体属性 CLR 类型；需要按属性类型选择绑定方式的方言（如 PostgreSQL 数组）会使用它</param>
+        public DbParameter CreateParameter(string name, object? value, Type propertyType)
         {
-            var parameter = CreateParameterCore(name, value);
+            ArgumentNullException.ThrowIfNull(propertyType);
+
+            var parameter = CreateParameterCore(name, value, propertyType);
 
             if (!string.Equals(name, parameter.ParameterName, StringComparison.Ordinal))
             {
@@ -169,14 +180,40 @@ namespace Customize_ORM.Extensions.Sql
         }
 
         /// <summary>
-        /// 由具体方言实现真实参数对象创建。
+        /// 由具体方言实现真实参数对象创建。默认忽略属性类型，仅按值创建参数。
+        /// </summary>
+        /// <param name="name">参数名（含占位符前缀）</param>
+        /// <param name="value">参数值</param>
+        /// <param name="propertyType">实体属性 CLR 类型</param>
+        protected virtual DbParameter CreateParameterCore(string name, object? value, Type propertyType)
+            => CreateParameterCore(name, value);
+
+        /// <summary>
+        /// 由具体方言实现真实参数对象创建（不关心属性类型时的简化重载）。
         /// </summary>
         protected abstract DbParameter CreateParameterCore(string name, object? value);
 
         /// <summary>
-        /// 根据数据库类型获取方言实现。
+        /// 构建"按主键集合删除"的语句。
+        /// 各库语法差异明显：PostgreSQL 可用数组参数 ANY(@ids)，虚谷需展开为 IN (:key0, :key1, ...)。
         /// </summary>
-        public static SqlDialect For(DBType dbType) => dbType switch
+        /// <param name="tableName">目标表名</param>
+        /// <param name="keyColumn">主键列名</param>
+        /// <param name="keyValues">主键值集合</param>
+        /// <param name="keyType">主键值的 CLR 类型</param>
+        /// <param name="parameters">输出：本语句需要绑定的参数集合</param>
+        public abstract string BuildDeleteByKeysSql(
+            string tableName,
+            string keyColumn,
+            IReadOnlyList<object?> keyValues,
+            Type keyType,
+            out List<DbParameter> parameters);
+
+        /// <summary>
+        /// 根据数据库类型获取方言实现（全局唯一的方言解析入口）。
+        /// </summary>
+        /// <param name="dbType">数据库类型</param>
+        public static IQueryDialect For(DBType dbType) => dbType switch
         {
             DBType.PostgreSQL => PostgreSql,
             DBType.ClickHouse => ClickHouse,
